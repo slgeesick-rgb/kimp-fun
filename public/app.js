@@ -148,6 +148,10 @@ const state = {
   lastRoomFetchTimestamp: 0,
   roomCreatedAt: null,
   roomTimeoutMinutes: null,
+  // Client-side prediction for smoother movement
+  predictedPosition: { x: 0, y: 0 },
+  lastServerPosition: { x: 0, y: 0 },
+  lastUpdateTime: 0,
 };
 
 // Game tips for players
@@ -710,7 +714,18 @@ const keyMap = {
 
 const heldKeys = new Set();
 
+// Helper function to check if user is typing in an input field
+function isTypingInInput(event) {
+  const target = event.target;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
+}
+
+// Use capture phase and passive:false for instant response
 window.addEventListener('keydown', (event) => {
+  // Don't capture keys when user is typing in input fields
+  if (isTypingInInput(event)) return;
+  
   if (event.repeat) return;
   if (event.code === 'Space') {
     queuePowerup();
@@ -721,14 +736,19 @@ window.addEventListener('keydown', (event) => {
   if (!dir) return;
   heldKeys.add(dir);
   updateKeyboardDir();
-});
+  event.preventDefault(); // Prevent any default scrolling behavior
+}, { capture: true, passive: false });
 
 window.addEventListener('keyup', (event) => {
+  // Don't capture keys when user is typing in input fields
+  if (isTypingInInput(event)) return;
+  
   const dir = keyMap[event.code];
   if (!dir) return;
   heldKeys.delete(dir);
   updateKeyboardDir();
-});
+  event.preventDefault();
+}, { capture: true, passive: false });
 
 setupJoystick();
 
@@ -1233,6 +1253,14 @@ function updateFromSerializedState(serialized) {
     });
 
     state.gameState = serialized;
+    
+    // Update client-side prediction tracking
+    const currentPlayer = serialized.players?.find(p => p.id === state.playerId);
+    if (currentPlayer) {
+      state.lastServerPosition = { x: currentPlayer.x, y: currentPlayer.y };
+      state.predictedPosition = { x: currentPlayer.x, y: currentPlayer.y };
+      state.lastUpdateTime = Date.now();
+    }
   }
   if (serialized.state === 'results') {
     state.resultsState = serialized;
@@ -1539,9 +1567,22 @@ function updateScoreTracking(players) {
   });
 }
 
-setInterval(() => {
+// Optimized input loop - send at 60fps (16.67ms) for more responsive controls
+let lastInputSent = 0;
+let inputLoopRunning = false;
+
+function inputLoop(timestamp) {
+  if (!inputLoopRunning) return;
+  
+  requestAnimationFrame(inputLoop);
+  
+  // Throttle to approximately 60 updates per second
+  if (timestamp - lastInputSent < 16.67) return;
+  lastInputSent = timestamp;
+  
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   if (!state.playerId) return;
+  
   state.inputSeq += 1;
   const payload = {
     type: 'input',
@@ -1553,7 +1594,11 @@ setInterval(() => {
   state.pendingAction = false;
   state.pendingPowerup = false;
   sendMessage(payload);
-}, 50);
+}
+
+// Start input loop
+inputLoopRunning = true;
+requestAnimationFrame(inputLoop);
 
 function draw(timestamp) {
   requestAnimationFrame(draw);
@@ -2089,9 +2134,34 @@ function drawPlayers(players) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
   players.forEach((player) => {
-    const x = player.x * scaleX;
-    const y = player.y * scaleY;
     const isSelf = player.id === state.playerId;
+    let x = player.x * scaleX;
+    let y = player.y * scaleY;
+    
+    // Apply client-side prediction for current player for instant feedback
+    if (isSelf && player.alive) {
+      const now = Date.now();
+      const timeSinceUpdate = now - state.lastUpdateTime;
+      
+      // Only predict if we have input and update is recent (within 200ms)
+      if (timeSinceUpdate < 200) {
+        const speed = 3.5; // Match server speed (adjust if different)
+        const dt = timeSinceUpdate / 1000; // Convert to seconds
+        
+        // Apply predicted movement based on current input
+        const moveX = state.combinedDir.x * speed * dt;
+        const moveY = state.combinedDir.y * speed * dt;
+        
+        // Smoothly interpolate between server position and predicted position
+        const predictedX = (state.lastServerPosition.x + moveX) * scaleX;
+        const predictedY = (state.lastServerPosition.y + moveY) * scaleY;
+        
+        // Blend server and predicted positions (70% predicted for responsiveness)
+        x = x * 0.3 + predictedX * 0.7;
+        y = y * 0.3 + predictedY * 0.7;
+      }
+    }
+    
     const radius = isSelf ? 13 : 12;
 
     if (!player.alive) {

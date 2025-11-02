@@ -17,7 +17,8 @@ const DEFAULT_CONFIG = {
   deathPenaltyEnabled: true,
 };
 
-const TICK_RATE = 30;
+// Increased tick rate for smoother, more responsive gameplay
+const TICK_RATE = 60;
 const FRAME_MS = 1000 / TICK_RATE;
 const PLAYER_RADIUS = 18;
 const COIN_RADIUS = 12;
