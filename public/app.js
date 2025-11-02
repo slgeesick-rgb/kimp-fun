@@ -40,9 +40,18 @@ const elements = {
   joystick: document.getElementById('joystick'),
   joystickHandle: document.getElementById('joystick-handle'),
   canvas: document.getElementById('game-canvas'),
+  leaveGame: document.getElementById('leave-game'),
 };
 
-const ctx = elements.canvas.getContext('2d');
+const ctx = elements.canvas.getContext('2d', { 
+  alpha: false,
+  desynchronized: true,
+  willReadFrequently: false 
+});
+
+// Enable smooth rendering
+ctx.imageSmoothingEnabled = true;
+ctx.imageSmoothingQuality = 'high';
 
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = `${wsProtocol}//${location.host}`;
@@ -70,7 +79,46 @@ const state = {
   combinedDir: { x: 0, y: 0 },
   lastScores: new Map(),
   scoreHistory: new Map(),
+  leavingPlayers: new Map(), // playerId -> { x, y, startTime, animationTime }
 };
+
+// Session persistence functions
+function saveSession() {
+  if (state.roomId && state.playerId) {
+    const session = {
+      roomId: state.roomId,
+      playerId: state.playerId,
+      isHost: state.isHost,
+      hostKey: state.hostKey,
+      passcode: state.passcode,
+      joinUrl: state.joinUrl,
+      timestamp: Date.now()
+    };
+    sessionStorage.setItem('kimpfun_session', JSON.stringify(session));
+  }
+}
+
+function loadSession() {
+  const saved = sessionStorage.getItem('kimpfun_session');
+  if (!saved) return null;
+  
+  try {
+    const session = JSON.parse(saved);
+    // Session expires after 2 hours
+    if (Date.now() - session.timestamp > 2 * 60 * 60 * 1000) {
+      sessionStorage.removeItem('kimpfun_session');
+      return null;
+    }
+    return session;
+  } catch (err) {
+    console.warn('Failed to load session', err);
+    return null;
+  }
+}
+
+function clearSession() {
+  sessionStorage.removeItem('kimpfun_session');
+}
 
 const audio = {
   ctx: null,
@@ -222,6 +270,41 @@ elements.rematch.addEventListener('click', () => {
   if (!state.isHost || !state.ws) return;
   sendMessage({ type: 'rematch' });
 });
+
+elements.leaveGame.addEventListener('click', () => {
+  if (confirm('Are you sure you want to leave the game?')) {
+    leaveGame();
+  }
+});
+
+function leaveGame() {
+  // Close WebSocket connection
+  if (state.ws) {
+    state.ws.close();
+    state.ws = null;
+  }
+  
+  // Clear session
+  clearSession();
+  
+  // Reset state
+  state.playerId = null;
+  state.roomId = null;
+  state.isHost = false;
+  state.hostKey = null;
+  state.joinUrl = null;
+  state.passcode = null;
+  state.lastLobbyState = null;
+  state.gameState = null;
+  state.resultsState = null;
+  
+  // Hide leave button
+  elements.leaveGame.style.display = 'none';
+  
+  // Go to splash screen
+  showScreen('splash');
+  showStatus('Left the game');
+}
 
 elements.actionButton.addEventListener('touchstart', (e) => {
   e.preventDefault();
@@ -454,6 +537,8 @@ function connectSocket({ roomId, name, hostKey, passcode }) {
   socket.addEventListener('close', () => {
     if (state.ws === socket) {
       state.ws = null;
+      elements.leaveGame.style.display = 'none';
+      clearSession();
       showStatus('Connection closed', true);
     }
   });
@@ -484,19 +569,32 @@ function handleServerMessage(message) {
       updateFromSerializedState(message.state);
       showStatus('Connected');
       handleStateTransition(message.state);
+      
+      // Save session and show leave button
+      saveSession();
+      elements.leaveGame.style.display = 'block';
       break;
     case 'lobby-update':
       updateFromSerializedState(message.state);
-      if (state.screen !== 'lobby') {
+      // Only switch to lobby if not in an active game or results
+      if (state.screen !== 'lobby' && state.screen !== 'game' && state.screen !== 'results') {
         showScreen('lobby');
+      } else if (state.screen === 'lobby') {
+        renderLobby();
       }
-      renderLobby();
+      // If in game/results, just update state silently without switching screens
       break;
     case 'match-start':
       updateFromSerializedState(message.state);
       state.resultsState = null;
       showScreen('game');
       renderHud();
+      break;
+    case 'player-joined':
+      if (message.playerId !== state.playerId) {
+        showStatus(`${message.playerName} joined the match`);
+        audio.playTone(550, 0.1, 0.08);
+      }
       break;
     case 'state':
       updateFromSerializedState(message.state);
@@ -546,6 +644,35 @@ function updateFromSerializedState(serialized) {
     state.lastLobbyState = serialized;
   }
   if (serialized.state === 'running') {
+    // Detect players that left (were in previous state but not in new state)
+    if (state.gameState && state.gameState.players) {
+      const newPlayerIds = new Set((serialized.players || []).map(p => p.id));
+      const oldPlayers = state.gameState.players || [];
+      
+      oldPlayers.forEach(oldPlayer => {
+        if (!newPlayerIds.has(oldPlayer.id)) {
+          // Player left - start leave animation
+          state.leavingPlayers.set(oldPlayer.id, {
+            x: oldPlayer.x,
+            y: oldPlayer.y,
+            name: oldPlayer.name,
+            startTime: Date.now(),
+            animationDuration: 400 // 400ms animation
+          });
+          
+          // Play leave sound effect (descending tone)
+          if (oldPlayer.id !== state.playerId) {
+            audio.playTone(400, 0.15, 0.1);
+          }
+          
+          // Remove from animation list after animation completes
+          setTimeout(() => {
+            state.leavingPlayers.delete(oldPlayer.id);
+          }, 450);
+        }
+      });
+    }
+    
     state.gameState = serialized;
   }
   if (serialized.state === 'results') {
@@ -585,8 +712,15 @@ function renderLobby() {
       li.append(name, badge);
       elements.playerList.appendChild(li);
     });
-  elements.startButton.disabled = !state.isHost || (players?.length || 0) < 2;
+  elements.startButton.disabled = !state.isHost || (players?.length || 0) < 1;
   elements.rematch.disabled = !state.isHost;
+  
+  // Update button text based on player count
+  if (state.isHost && players?.length === 1) {
+    elements.startButton.textContent = 'Play Solo';
+  } else {
+    elements.startButton.textContent = 'Start Game';
+  }
 }
 
 function renderHud() {
@@ -650,7 +784,10 @@ async function copyRoomLink() {
     return;
   }
   try {
-    await navigator.clipboard.writeText(state.joinUrl);
+    // Remove query parameters from the URL before copying
+    const url = new URL(state.joinUrl);
+    const cleanUrl = `${url.origin}${url.pathname}`;
+    await navigator.clipboard.writeText(cleanUrl);
     showStatus('Link copied');
   } catch (err) {
     console.warn('Copy failed', err);
@@ -701,43 +838,46 @@ function draw(timestamp) {
 requestAnimationFrame(draw);
 
 function clearCanvas() {
-  ctx.fillStyle = '#0B0F12';
-  ctx.fillRect(0, 0, elements.canvas.width, elements.canvas.height);
+  const width = parseFloat(elements.canvas.style.width) || elements.canvas.width;
+  const height = parseFloat(elements.canvas.style.height) || elements.canvas.height;
+  ctx.fillStyle = '#0A0E13';
+  ctx.fillRect(0, 0, width, height);
 }
 
 function renderGameScene(game, timestamp) {
-  const width = elements.canvas.width;
-  const height = elements.canvas.height;
+  const width = parseFloat(elements.canvas.style.width) || elements.canvas.width;
+  const height = parseFloat(elements.canvas.style.height) || elements.canvas.height;
   ctx.clearRect(0, 0, width, height);
 
   if (!state.lowGraphics) {
     drawBackdrop(width, height, timestamp);
   } else {
-    ctx.fillStyle = '#0B0F12';
+    ctx.fillStyle = '#0A0E13';
     ctx.fillRect(0, 0, width, height);
   }
 
   drawCoins(game.coins || []);
   drawEnemies(game.enemies || []);
   drawPlayers(game.players || []);
+  drawLeavingPlayers(timestamp);
 
   if (game.state === 'results') {
-    ctx.fillStyle = 'rgba(11, 15, 18, 0.6)';
+    ctx.fillStyle = 'rgba(10, 14, 19, 0.75)';
     ctx.fillRect(0, 0, width, height);
   }
 }
 
 function drawBackdrop(width, height, timestamp) {
-  const gradient = ctx.createRadialGradient(width / 2, height / 2, 50, width / 2, height / 2, width);
-  gradient.addColorStop(0, '#112022');
-  gradient.addColorStop(1, '#061015');
-  ctx.fillStyle = gradient;
+  // Base dark background
+  ctx.fillStyle = '#0A0E13';
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-  ctx.lineWidth = 1;
-  const gridSize = 48;
-  const offset = (timestamp / 40) % gridSize;
+  // Animated grid pattern
+  ctx.strokeStyle = 'rgba(63, 77, 94, 0.15)';
+  ctx.lineWidth = 1.5;
+  const gridSize = 60;
+  const offset = (timestamp / 50) % gridSize;
+  
   for (let x = -gridSize; x < width + gridSize; x += gridSize) {
     ctx.beginPath();
     ctx.moveTo(x + offset, 0);
@@ -750,6 +890,25 @@ function drawBackdrop(width, height, timestamp) {
     ctx.lineTo(width, y + offset);
     ctx.stroke();
   }
+
+  // Crosshair intersections
+  ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
+  for (let x = 0; x < width; x += gridSize) {
+    for (let y = 0; y < height; y += gridSize) {
+      const actualX = (x + offset) % width;
+      const actualY = (y + offset) % height;
+      ctx.fillRect(actualX - 2, actualY - 2, 4, 4);
+    }
+  }
+
+  // Border accent lines
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.3)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(8, 8, width - 16, height - 16);
+
+  ctx.strokeStyle = 'rgba(22, 163, 74, 0.2)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(4, 4, width - 8, height - 8);
 }
 
 function drawCoins(coins) {
@@ -758,13 +917,34 @@ function drawCoins(coins) {
   coins.forEach((coin) => {
     const x = coin.x * scaleX;
     const y = coin.y * scaleY;
+    
+    // Outer glow circle
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.2)';
+    ctx.beginPath();
+    ctx.arc(x, y, 16, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Main coin body
     ctx.fillStyle = '#F59E0B';
     ctx.beginPath();
-    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.arc(x, y, 11, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#FFE08A';
+
+    // Coin border
+    ctx.strokeStyle = '#B45309';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Inner highlight
+    ctx.fillStyle = '#FCD34D';
     ctx.beginPath();
-    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.arc(x - 2, y - 2, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Center dot
+    ctx.fillStyle = '#FBBF24';
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
     ctx.fill();
   });
 }
@@ -775,15 +955,48 @@ function drawEnemies(enemies) {
   enemies.forEach((enemy) => {
     const x = enemy.x * scaleX;
     const y = enemy.y * scaleY;
-    const radius = enemy.active === false ? 6 : 16;
-    ctx.beginPath();
-    ctx.fillStyle = enemy.active === false ? 'rgba(255,255,255,0.2)' : '#E11D48';
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-    if (!state.lowGraphics && enemy.active !== false) {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    
+    if (enemy.active === false) {
+      // Defeated enemy
+      ctx.fillStyle = 'rgba(100, 116, 139, 0.3)';
+      ctx.beginPath();
+      ctx.arc(x, y, 8, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
       ctx.lineWidth = 2;
       ctx.stroke();
+    } else {
+      // Active enemy with danger indicator
+      if (!state.lowGraphics) {
+        ctx.fillStyle = 'rgba(225, 29, 72, 0.15)';
+        ctx.beginPath();
+        ctx.arc(x, y, 24, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Main enemy body
+      ctx.fillStyle = '#DC2626';
+      ctx.beginPath();
+      ctx.arc(x, y, 16, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Enemy border
+      ctx.strokeStyle = '#991B1B';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // Inner core
+      ctx.fillStyle = '#EF4444';
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Bright center
+      ctx.fillStyle = '#FCA5A5';
+      ctx.beginPath();
+      ctx.arc(x - 3, y - 3, 4, 0, Math.PI * 2);
+      ctx.fill();
     }
   });
 }
@@ -795,35 +1008,166 @@ function drawPlayers(players) {
     const x = player.x * scaleX;
     const y = player.y * scaleY;
     const isSelf = player.id === state.playerId;
-    ctx.beginPath();
-    ctx.fillStyle = isSelf ? '#16A34A' : '#38BDF8';
-    ctx.arc(x, y, isSelf ? 18 : 16, 0, Math.PI * 2);
-    ctx.fill();
+    const radius = isSelf ? 18 : 16;
+
     if (!player.alive) {
-      ctx.fillStyle = 'rgba(8, 10, 12, 0.6)';
+      // Dead player
+      ctx.fillStyle = 'rgba(31, 41, 55, 0.6)';
       ctx.beginPath();
-      ctx.arc(x, y, 18, 0, Math.PI * 2);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fill();
-    }
-    if (!state.lowGraphics && player.dashing) {
-      ctx.strokeStyle = '#EAB308';
-      ctx.lineWidth = 4;
+
+      ctx.strokeStyle = 'rgba(75, 85, 99, 0.8)';
+      ctx.lineWidth = 2;
       ctx.stroke();
+    } else {
+      // Dashing effect
+      if (!state.lowGraphics && player.dashing) {
+        ctx.fillStyle = isSelf ? 'rgba(22, 163, 74, 0.2)' : 'rgba(56, 189, 248, 0.2)';
+        ctx.beginPath();
+        ctx.arc(x, y, radius + 12, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#F59E0B';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(x, y, radius + 6, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Main player body
+      ctx.fillStyle = isSelf ? '#16A34A' : '#0EA5E9';
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Player border
+      ctx.strokeStyle = isSelf ? '#15803D' : '#0369A1';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // Inner highlight
+      ctx.fillStyle = isSelf ? '#22C55E' : '#38BDF8';
+      ctx.beginPath();
+      ctx.arc(x, y, radius - 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Bright spot
+      ctx.fillStyle = isSelf ? '#86EFAC' : '#BAE6FD';
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 4, 5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Self indicator
+      if (isSelf) {
+        ctx.strokeStyle = '#F59E0B';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '14px "Segoe UI", sans-serif';
+
+    // Player name with background
+    ctx.fillStyle = 'rgba(10, 14, 19, 0.8)';
+    ctx.font = 'bold 13px "Segoe UI", sans-serif';
+    const textWidth = ctx.measureText(player.name).width;
+    ctx.fillRect(x - textWidth / 2 - 6, y - 34, textWidth + 12, 18);
+
+    ctx.strokeStyle = isSelf ? '#F59E0B' : '#3F4D5E';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x - textWidth / 2 - 6, y - 34, textWidth + 12, 18);
+
+    ctx.fillStyle = isSelf ? '#FBBF24' : '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(player.name, x, y - 25);
+  });
+}
+
+function drawLeavingPlayers(timestamp) {
+  const scaleX = canvasScaleX();
+  const scaleY = canvasScaleY();
+  
+  state.leavingPlayers.forEach((leaving, playerId) => {
+    // Safety checks
+    if (!leaving || !leaving.startTime || !leaving.animationDuration) {
+      state.leavingPlayers.delete(playerId);
+      return;
+    }
+    
+    const elapsed = timestamp - leaving.startTime;
+    const progress = Math.min(Math.max(0, elapsed / leaving.animationDuration), 1);
+    
+    // Easing function for smooth pop-out
+    const easeOut = 1 - Math.pow(1 - progress, 3);
+    
+    const x = leaving.x * scaleX;
+    const y = leaving.y * scaleY;
+    
+    // Scale effect - grows then shrinks (ensure it never goes below 0.1)
+    let scale;
+    if (progress < 0.3) {
+      scale = 1 + progress * 0.5; // 1.0 to 1.15
+    } else {
+      scale = Math.max(0.1, 1.15 - (progress - 0.3) * 1.5); // 1.15 to 0.1
+    }
+    const radius = Math.max(1, 18 * scale); // Ensure radius is always positive
+    
+    // Fade out
+    const alpha = Math.max(0, 1 - easeOut);
+    
+    // Pop-out with expanding circle
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    
+    // Outer ring (expanding)
+    ctx.strokeStyle = '#DC2626';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(x, y, radius * (1 + progress * 2), 0, Math.PI * 2);
+    ctx.stroke();
+    
+    // Player body
+    ctx.fillStyle = '#64748B';
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // X mark
+    ctx.strokeStyle = '#DC2626';
+    ctx.lineWidth = 3;
+    const crossSize = radius * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x - crossSize, y - crossSize);
+    ctx.lineTo(x + crossSize, y + crossSize);
+    ctx.moveTo(x + crossSize, y - crossSize);
+    ctx.lineTo(x - crossSize, y + crossSize);
+    ctx.stroke();
+    
+    // Name fading out
+    ctx.fillStyle = `rgba(148, 163, 184, ${alpha})`;
+    ctx.font = 'bold 13px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(player.name, x, y - 24);
+    ctx.fillText(leaving.name, x, y - radius - 8);
+    
+    ctx.restore();
   });
 }
 
 function canvasScaleX() {
-  return elements.canvas.width / 1600;
+  const displayWidth = parseFloat(elements.canvas.style.width) || elements.canvas.width;
+  return displayWidth / 1600;
 }
 
 function canvasScaleY() {
-  return elements.canvas.height / 900;
+  const displayHeight = parseFloat(elements.canvas.style.height) || elements.canvas.height;
+  return displayHeight / 900;
 }
 
 window.addEventListener('resize', () => resizeCanvas(), { passive: true });
@@ -841,8 +1185,22 @@ function resizeCanvas() {
   }
   width = Math.max(640, Math.floor(width));
   height = Math.max(360, Math.floor(height));
-  elements.canvas.width = width;
-  elements.canvas.height = height;
+  
+  // Set display size (CSS pixels)
+  elements.canvas.style.width = width + 'px';
+  elements.canvas.style.height = height + 'px';
+  
+  // Set actual size in memory (scaled for high-DPI)
+  const dpr = window.devicePixelRatio || 1;
+  elements.canvas.width = width * dpr;
+  elements.canvas.height = height * dpr;
+  
+  // Scale the context to maintain proper coordinate system
+  ctx.scale(dpr, dpr);
+  
+  // Re-enable smooth rendering after resize
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 }
 
 function updateFromDeepLink() {
@@ -859,7 +1217,42 @@ function updateFromDeepLink() {
   }
 }
 
-updateFromDeepLink();
+function tryRestoreSession() {
+  const session = loadSession();
+  if (!session) return false;
+  
+  // Restore state
+  state.roomId = session.roomId;
+  state.playerId = session.playerId;
+  state.isHost = session.isHost;
+  state.hostKey = session.hostKey;
+  state.passcode = session.passcode;
+  state.joinUrl = session.joinUrl;
+  
+  // Show leave button
+  elements.leaveGame.style.display = 'block';
+  
+  // Get display name from session or use a default
+  const displayName = session.joinUrl ? 
+    new URLSearchParams(new URL(session.joinUrl).search).get('name') || 'Player' : 
+    'Player';
+  
+  // Reconnect
+  showStatus('Reconnecting...');
+  connectSocket({
+    roomId: session.roomId,
+    name: displayName,
+    hostKey: session.hostKey,
+    passcode: session.passcode
+  });
+  
+  return true;
+}
+
+// Try to restore session first, then check deep link
+if (!tryRestoreSession()) {
+  updateFromDeepLink();
+}
 
 function resizeObserverFallback() {
   resizeCanvas();

@@ -29,15 +29,17 @@ const MAX_ENEMIES = 6;
 const RESPAWN_MS = 2000;
 const DASH_DURATION_MS = 220;
 const DASH_COOLDOWN_MS = 900;
-const PLAYER_SPEED = 220;
-const DASH_SPEED = 420;
-const ENEMY_SPEED = 140;
+const PLAYER_SPEED = 380;
+const DASH_SPEED = 650;
+const ENEMY_SPEED = 160;
 const INPUT_RATE_LIMIT_MS = 16;
 const LOBBY_HEARTBEAT_MS = 1000;
 const ROOM_SWEEP_MS = 60000;
+const RECONNECT_GRACE_MS = 10000; // 10 seconds to reconnect
 const PROFANITY_LIST = ['ass', 'dick', 'shit', 'fuck', 'bitch'];
 
 const rooms = new Map();
+const disconnectedPlayers = new Map(); // playerId -> { player, roomId, disconnectTime }
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -309,6 +311,46 @@ function handleJoin(socket, payload) {
     return;
   }
 
+  // Check if this is a reconnecting player
+  const loweredName = requestedName.toLowerCase();
+  const existingPlayer = Array.from(room.players.values()).find(
+    p => p.name.toLowerCase() === loweredName && p.disconnected
+  );
+  
+  if (existingPlayer) {
+    // Reconnect existing player
+    existingPlayer.connection = socket;
+    existingPlayer.disconnected = false;
+    socket.playerId = existingPlayer.id;
+    socket.roomId = room.id;
+    
+    // Remove from disconnected list
+    disconnectedPlayers.delete(existingPlayer.id);
+    
+    send(socket, {
+      type: 'joined',
+      roomId: room.id,
+      playerId: existingPlayer.id,
+      isHost: existingPlayer.isHost,
+      state: serializeRoom(room),
+    });
+    
+    if (room.state === 'running') {
+      send(socket, {
+        type: 'match-start',
+        state: serializeGame(room),
+      });
+    } else {
+      broadcast(room, {
+        type: 'lobby-update',
+        state: serializeLobby(room),
+      });
+    }
+    
+    room.lastActive = Date.now();
+    return;
+  }
+
   if (room.players.size >= room.config.maxPlayers) {
     send(socket, { type: 'error', message: 'Room full' });
     return;
@@ -354,28 +396,50 @@ function handleJoin(socket, payload) {
     joinedAt: Date.now(),
   };
 
-  if (!player.isHost && room.state !== 'lobby') {
-    send(socket, { type: 'error', message: 'Match in progress' });
-    return;
-  }
-
   socket.playerId = playerId;
   socket.roomId = room.id;
   room.players.set(playerId, player);
   room.lastActive = Date.now();
 
-  send(socket, {
-    type: 'joined',
-    roomId: room.id,
-    playerId,
-    isHost: player.isHost,
-    state: serializeRoom(room),
-  });
+  // If joining during active match, spawn player in the game
+  if (room.state === 'running') {
+    player.x = Math.random() * (MAP_WIDTH - 400) + 200;
+    player.y = Math.random() * (MAP_HEIGHT - 400) + 200;
+    
+    send(socket, {
+      type: 'joined',
+      roomId: room.id,
+      playerId,
+      isHost: player.isHost,
+      state: serializeRoom(room),
+    });
 
-  broadcast(room, {
-    type: 'lobby-update',
-    state: serializeLobby(room),
-  });
+    // Notify existing players
+    broadcast(room, {
+      type: 'player-joined',
+      playerId: playerId,
+      playerName: player.name,
+    });
+
+    // Send game state to new player
+    send(socket, {
+      type: 'match-start',
+      state: serializeGame(room),
+    });
+  } else {
+    send(socket, {
+      type: 'joined',
+      roomId: room.id,
+      playerId,
+      isHost: player.isHost,
+      state: serializeRoom(room),
+    });
+
+    broadcast(room, {
+      type: 'lobby-update',
+      state: serializeLobby(room),
+    });
+  }
 }
 
 function handleInput(socket, payload) {
@@ -411,8 +475,8 @@ function handleStart(socket, payload) {
   if (!room) return;
   if (!player.isHost) return;
   if (room.state !== 'lobby') return;
-  if (room.players.size < 2) {
-    send(player.connection, { type: 'error', message: 'Need at least two players to start' });
+  if (room.players.size < 1) {
+    send(player.connection, { type: 'error', message: 'No players in room' });
     return;
   }
 
@@ -426,8 +490,8 @@ function handleRematch(socket, payload) {
   if (!room) return;
   if (!player.isHost) return;
   if (room.state !== 'results') return;
-  if (room.players.size < 2) {
-    send(player.connection, { type: 'error', message: 'Need at least two players to start' });
+  if (room.players.size < 1) {
+    send(player.connection, { type: 'error', message: 'No players in room' });
     return;
   }
 
@@ -514,7 +578,7 @@ function updateMatch(room, now) {
   const delta = FRAME_MS / 1000;
 
   for (const player of room.players.values()) {
-    if (!player.connection || player.connection.readyState !== player.connection.OPEN) continue;
+    if (player.disconnected || !player.connection || player.connection.readyState !== player.connection.OPEN) continue;
     if (!player.alive) {
       if (now >= player.respawnAt) {
         player.alive = true;
@@ -555,7 +619,7 @@ function updateMatch(room, now) {
 function handleCoinCollisions(room, now) {
   const toDelete = [];
   for (const player of room.players.values()) {
-    if (!player.alive) continue;
+    if (player.disconnected || !player.alive) continue;
     for (const coin of room.coins.values()) {
       const dist = Math.hypot(player.x - coin.x, player.y - coin.y);
       if (dist <= PLAYER_RADIUS + COIN_RADIUS) {
@@ -601,7 +665,7 @@ function handleEnemyLogic(room, now, delta) {
     }
 
     for (const player of room.players.values()) {
-      if (!player.alive) continue;
+      if (player.disconnected || !player.alive) continue;
       const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
       if (dist <= PLAYER_RADIUS + ENEMY_RADIUS) {
         if (player.dashingUntil > now) {
@@ -670,12 +734,14 @@ function serializeLobby(room) {
     id: room.id,
     state: room.state,
     config: room.config,
-    players: Array.from(room.players.values()).map((p) => ({
-      id: p.id,
-      name: p.name,
-      isHost: p.isHost,
-      score: p.score,
-    })),
+    players: Array.from(room.players.values())
+      .filter(p => !p.disconnected) // Don't show disconnected players in lobby
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        isHost: p.isHost,
+        score: p.score,
+      })),
   };
 }
 
@@ -686,16 +752,18 @@ function serializeGame(room) {
     config: room.config,
     targetScore: room.config.targetScore,
     matchId: room.matchId,
-    players: Array.from(room.players.values()).map((p) => ({
-      id: p.id,
-      name: p.name,
-      x: Math.round(p.x),
-      y: Math.round(p.y),
-      score: p.score,
-      alive: p.alive,
-      isHost: p.isHost,
-      dashing: p.dashingUntil > Date.now(),
-    })),
+    players: Array.from(room.players.values())
+      .filter(p => !p.disconnected) // Don't send disconnected players in game state
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        x: Math.round(p.x),
+        y: Math.round(p.y),
+        score: p.score,
+        alive: p.alive,
+        isHost: p.isHost,
+        dashing: p.dashingUntil > Date.now(),
+      })),
     coins: Array.from(room.coins.values()).map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y) })),
     enemies: Array.from(room.enemies.values()).map((e) => ({ id: e.id, x: Math.round(e.x), y: Math.round(e.y), active: !e.respawnAt })),
   };
@@ -727,22 +795,55 @@ function handleDisconnect(socket) {
   if (!player) return;
   const room = rooms.get(player.roomId);
   if (!room) return;
-  room.players.delete(player.id);
-  if (player.isHost) {
-    promoteNewHost(room);
-  }
-  room.lastActive = Date.now();
-  broadcast(room, {
-    type: 'lobby-update',
-    state: serializeLobby(room),
+  
+  // Store disconnected player for potential reconnection
+  disconnectedPlayers.set(player.id, {
+    player: { ...player },
+    roomId: room.id,
+    disconnectTime: Date.now()
   });
-  if (room.players.size === 0) {
-    rooms.delete(room.id);
-  }
+  
+  // Mark player as disconnected but keep in room
+  player.connection = null;
+  player.disconnected = true;
+  
+  // Set a timeout to actually remove the player if they don't reconnect
+  setTimeout(() => {
+    const disconnectInfo = disconnectedPlayers.get(player.id);
+    if (disconnectInfo && Date.now() - disconnectInfo.disconnectTime >= RECONNECT_GRACE_MS) {
+      disconnectedPlayers.delete(player.id);
+      const currentRoom = rooms.get(disconnectInfo.roomId);
+      if (currentRoom) {
+        const currentPlayer = currentRoom.players.get(player.id);
+        if (currentPlayer && currentPlayer.disconnected) {
+          currentRoom.players.delete(player.id);
+          if (player.isHost) {
+            promoteNewHost(currentRoom);
+          }
+          currentRoom.lastActive = Date.now();
+          
+          // Only send lobby-update if in lobby, otherwise game continues
+          if (currentRoom.state === 'lobby') {
+            broadcast(currentRoom, {
+              type: 'lobby-update',
+              state: serializeLobby(currentRoom),
+            });
+          }
+          
+          if (currentRoom.players.size === 0) {
+            rooms.delete(currentRoom.id);
+          }
+        }
+      }
+    }
+  }, RECONNECT_GRACE_MS);
+  
+  room.lastActive = Date.now();
 }
 
 function promoteNewHost(room) {
   for (const candidate of room.players.values()) {
+    if (candidate.disconnected) continue; // Skip disconnected players
     candidate.isHost = true;
     broadcast(room, { type: 'host-change', playerId: candidate.id });
     break;

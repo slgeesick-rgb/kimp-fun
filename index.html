@@ -4,14 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kimp Fun</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body>
   <div id="app">
     <header class="top-bar">
-      <div><svg xmlns="http://www.w3.org/2000/svg" width="98" height="40" viewBox="0 0 98 40" fill="none"><g clip-path="url(#clip0_3_9)"><path d="M65.1322 0.144897H65.2033L65.1322 0.217498V0.144897Z" fill="white"/><path d="M13.2831 18.5858L25.0011 0H18.2871L7.43635 16.9886H6.0254V0.145202H0V30.565H6.0254V23.0145H9.30135C17.5597 39.0071 39.6981 45.4925 53.8291 34.6241C52.9109 33.0131 51.7589 30.9941 50.8035 29.3184C38.3761 39.3004 20.3199 32.7292 13.2831 18.5858Z" fill="white"/><path d="M96.9717 17.5545C97.58 16.0437 98.014 14.628 97.9996 12.8115C97.9645 8.27401 95.9553 4.41889 91.9176 2.32363C89.8861 1.31728 87.6946 0.682882 85.4446 0.449798C84.6692 0.353965 73.883 0.0200003 73.883 0.308952V30.492H79.9084V23.4381C79.9084 23.5543 85.7258 23.4381 86.3039 23.4309C94.0573 23.3909 96.9717 17.5545 96.9717 17.5545ZM90.0942 16.5381C87.4997 18.7241 79.9084 18.0947 79.9084 18.0947V5.7925C88.6151 5.7925 91.2785 7.78177 91.9491 11.3522C92.32 13.3299 91.4083 15.7083 90.0942 16.5396V16.5381Z" fill="white"/><path d="M62.1105 6.2436H62.0466V6.30531L55.3125 13.1088L54.8671 13.5575C51.1199 9.77128 45.2415 3.83252 41.5316 0.0870361V8.71203L41.5172 8.69751C41.5388 11.1086 41.5388 20.5373 41.5337 29.171C43.6755 28.5725 45.7094 27.6326 47.5591 26.3868V14.8011C48.7635 16.0157 51.0496 18.3244 52.2776 19.5645L54.8735 22.1839C56.7636 20.2759 60.1551 16.8514 62.0466 14.9369V30.565H68.072V0.224252L62.1105 6.2436Z" fill="white"/><path d="M36.3675 29.9113V0.144897H30.342V29.1562C32.1805 29.6594 34.0764 29.9155 35.9808 29.9178C36.1107 29.9178 36.2376 29.9113 36.3675 29.9113Z" fill="white"/></g><defs><clipPath id="clip0_3_9"><rect width="98" height="40" fill="white"/></clipPath></defs></svg></div>
+      <div class="brand">Kimp Fun</div>
       <div class="toggles">
-        <button id="leave-game" class="toggle leave-btn" style="display: none;">Leave Game</button>
         <button id="mute-toggle" class="toggle">Mute</button>
         <button id="graphics-toggle" class="toggle">Low Graphics: Off</button>
       </div>
@@ -43,16 +42,14 @@
           <label>Room Passcode
             <input type="text" id="create-passcode" maxlength="32" placeholder="Optional" />
           </label>
-          <div class="switch-row">
-            <label class="switch">
-              <input type="checkbox" id="create-passcode-enabled" checked />
-              <span>Require passcode</span>
-            </label>
-            <label class="switch">
-              <input type="checkbox" id="create-death-penalty" checked />
-              <span>Enable death penalty</span>
-            </label>
-          </div>
+          <label class="switch">
+            <input type="checkbox" id="create-passcode-enabled" checked />
+            <span>Require passcode</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="create-death-penalty" checked />
+            <span>Enable death penalty</span>
+          </label>
           <label>Room timeout (minutes)
             <input type="number" id="create-timeout" value="10" min="2" max="60" />
           </label>
@@ -65,7 +62,6 @@
 
       <section id="join-screen" class="screen">
         <h2>Join a Game</h2>
-        <p class="info-text">You can join games in lobby or already in progress!</p>
         <form id="join-form">
           <label>Join URL or Room ID
             <input type="text" id="join-link" required />
@@ -89,7 +85,6 @@
           <div id="room-id"></div>
           <div id="room-config"></div>
         </div>
-        <p class="info-text">Players can join even after the match starts. Share the link anytime!</p>
         <div class="lobby-controls">
           <button id="copy-link">Copy Link</button>
           <button id="start-game" class="primary">Start Game</button>
@@ -99,6 +94,10 @@
 
       <section id="game-screen" class="screen">
         <div class="hud">
+          <div class="scoreboard">
+            <h3>Scores</h3>
+            <ul id="score-list"></ul>
+          </div>
           <div class="progress-bar">
             <div class="label">Progress to victory</div>
             <div class="bar">
@@ -107,10 +106,6 @@
           </div>
         </div>
         <canvas id="game-canvas" width="960" height="540"></canvas>
-        <div class="scoreboard">
-          <h3>Scores</h3>
-          <ul id="score-list"></ul>
-        </div>
         <div id="mobile-controls">
           <div id="joystick">
             <div id="joystick-handle"></div>
@@ -135,6 +130,6 @@
     </footer>
   </div>
 
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/public/app.js"></script>
 </body>
 </html>
