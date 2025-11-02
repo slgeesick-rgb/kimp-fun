@@ -268,6 +268,7 @@ async function handleCreateRoom(req, res) {
     lastRapidfireSpawn: 0,
     config,
     createdAt: Date.now(),
+    gameStartedAt: null, // Track when the game actually starts
     lastActive: Date.now(),
     state: 'lobby',
     matchId: 0,
@@ -607,6 +608,11 @@ function startMatch(room, isRematch = false) {
   room.powerupsSpawnedThisGame = 0; // Reset powerup counter for new game
   room.lastRapidfireSpawn = Date.now();
   room.lastActive = Date.now();
+  
+  // Set game start time for countdown timer (only on first match start)
+  if (!room.gameStartedAt) {
+    room.gameStartedAt = Date.now();
+  }
 
   const seeds = crypto.randomBytes(8).readUInt32BE(0);
   room.randomSeed = seeds;
@@ -755,6 +761,25 @@ function updateRooms() {
 function updateMatch(room, now) {
   const delta = FRAME_MS / 1000;
 
+  // Check if room has timed out
+  if (room.createdAt && room.config.roomTimeoutMinutes) {
+    const timeoutMs = room.config.roomTimeoutMinutes * 60 * 1000;
+    const elapsedMs = now - room.createdAt;
+    if (elapsedMs >= timeoutMs) {
+      // Game has timed out - end the match
+      room.state = 'results';
+      room.winnerId = null; // No winner for timeout
+      room.lastActive = now;
+      broadcast(room, {
+        type: 'match-end',
+        winnerId: null,
+        timedOut: true,
+        state: serializeResults(room),
+      });
+      return; // Stop processing this frame
+    }
+  }
+
   for (const player of room.players.values()) {
     if (player.disconnected || !player.connection || player.connection.readyState !== player.connection.OPEN) continue;
     if (!player.alive) {
@@ -895,7 +920,7 @@ function handlePowerupUsage(room, now) {
           target.respawnAt = now + RESPAWN_MS;
           
           // Give points to the player who used the powerup
-          player.score += 3;
+          player.score += 10;
           if (checkWin(room, player)) {
             return;
           }
@@ -1048,8 +1073,8 @@ function handleBulletCollisions(room, now) {
       
       const dist = Math.hypot(enemy.x - bullet.x, enemy.y - bullet.y);
       if (dist <= ENEMY_RADIUS + BULLET_RADIUS) {
-        // Hit enemy - respawn it
-        enemy.respawnAt = now + 3000;
+        // Hit enemy - respawn it after 6 seconds
+        enemy.respawnAt = now + 6000;
         
         // Give score to shooter
         const shooter = room.players.get(bullet.ownerId);
@@ -1108,10 +1133,10 @@ function handleEnemyLogic(room, now, delta) {
         if (player.dashingUntil > now) {
           player.score += 2;
           if (checkWin(room, player)) {
-            enemy.respawnAt = now + 1500;
+            enemy.respawnAt = now + 6000;
             return;
           }
-          enemy.respawnAt = now + 1500;
+          enemy.respawnAt = now + 6000;
         } else if (room.config.deathPenaltyEnabled) {
           player.score = Math.max(0, player.score - 1);
           player.alive = false;
@@ -1171,6 +1196,7 @@ function serializeLobby(room) {
     id: room.id,
     state: room.state,
     config: room.config,
+    gameStartedAt: room.gameStartedAt, // Send game start time (null if not started)
     players: Array.from(room.players.values())
       .filter(p => !p.disconnected) // Don't show disconnected players in lobby
       .map((p) => ({
@@ -1188,6 +1214,7 @@ function serializeGame(room) {
     id: room.id,
     state: room.state,
     config: room.config,
+    gameStartedAt: room.gameStartedAt,
     targetScore: room.config.targetScore,
     matchId: room.matchId,
     players: Array.from(room.players.values())
@@ -1311,10 +1338,26 @@ function resolvePlayer(socket) {
 function sweepRooms() {
   const now = Date.now();
   rooms.forEach((room, id) => {
-    if (room.players.size === 0) {
-      if (now - room.lastActive > room.config.roomTimeoutMinutes * 60000) {
-        rooms.delete(id);
-      }
+    const timeoutMs = room.config.roomTimeoutMinutes * 60000;
+    const inactiveMs = now - room.lastActive;
+    
+    if (inactiveMs > timeoutMs) {
+      console.log(`Sweeping room ${id} - inactive for ${Math.floor(inactiveMs / 60000)} minutes (timeout: ${room.config.roomTimeoutMinutes} minutes)`);
+      
+      // Notify all players in the room before deletion
+      broadcast(room, {
+        type: 'error',
+        message: `Room has expired due to inactivity (${room.config.roomTimeoutMinutes} minutes).`
+      });
+      
+      // Close all connections
+      room.players.forEach((player) => {
+        if (player.connection && player.connection.readyState === player.connection.OPEN) {
+          player.connection.close();
+        }
+      });
+      
+      rooms.delete(id);
     }
   });
 }

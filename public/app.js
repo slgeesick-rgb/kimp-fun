@@ -8,7 +8,7 @@ const screens = {
 };
 
 const elements = {
-  status: document.getElementById('status-banner'),
+  toastContainer: document.getElementById('toast-container'),
   createForm: document.getElementById('create-form'),
   createName: document.getElementById('create-name'),
   createTarget: document.getElementById('create-target'),
@@ -47,6 +47,9 @@ const elements = {
   canvas: document.getElementById('game-canvas'),
   effectLayer: document.getElementById('effect-layer'),
   leaveGame: document.getElementById('leave-game'),
+  tipText: document.getElementById('tip-text'),
+  roomTimer: document.getElementById('room-timer'),
+  timerDisplay: document.getElementById('timer-display'),
 };
 
 const ctx = elements.canvas.getContext('2d', { 
@@ -65,6 +68,7 @@ const wsUrl = `${wsProtocol}//${location.host}`;
 const assets = {
   blast: '/assets/blast.gif',
   enemy: '/assets/enemy.webp',
+  background: '/assets/game-bg.webp',
 };
 
 const WORLD_WIDTH = 1600;
@@ -79,6 +83,9 @@ blastPreload.src = assets.blast;
 
 const enemyImage = new Image();
 enemyImage.src = assets.enemy;
+
+const backgroundImage = new Image();
+backgroundImage.src = assets.background;
 
 // Preload spaceship images
 const spaceshipImages = {};
@@ -139,7 +146,101 @@ const state = {
   takenSpaceships: new Set(), // Track which spaceships are taken in the room
   lastFetchedRoomId: null,
   lastRoomFetchTimestamp: 0,
+  roomCreatedAt: null,
+  roomTimeoutMinutes: null,
 };
+
+// Game tips for players
+const gameTips = [
+  "Use WASD or Arrow keys to move your spaceship",
+  "Press SPACE to Jump on to the near enemies to destroy them",
+  "Collect Yellow power-ups to boost your score",
+  "Avoid colliding with enemies to stay alive",
+  "Each kill earns points toward victory",
+  "If death penalty is on, dying reduces your score",
+  "Keep moving to dodge enemy attacks"
+];
+
+let currentTipIndex = 0;
+let tipRotationInterval = null;
+
+function rotateTip() {
+  if (elements.tipText) {
+    elements.tipText.textContent = gameTips[currentTipIndex];
+    currentTipIndex = (currentTipIndex + 1) % gameTips.length;
+  }
+}
+
+function startTipRotation() {
+  if (tipRotationInterval) clearInterval(tipRotationInterval);
+  rotateTip(); // Show first tip immediately
+  tipRotationInterval = setInterval(rotateTip, 8000); // Rotate every 8 seconds
+}
+
+function stopTipRotation() {
+  if (tipRotationInterval) {
+    clearInterval(tipRotationInterval);
+    tipRotationInterval = null;
+  }
+  if (elements.tipText) {
+    elements.tipText.textContent = '';
+  }
+}
+
+// Room timer functions
+let timerInterval = null;
+
+function updateRoomTimer() {
+  if (!state.roomCreatedAt || !state.roomTimeoutMinutes) {
+    hideRoomTimer();
+    return;
+  }
+
+  const now = Date.now();
+  const expiresAt = state.roomCreatedAt + (state.roomTimeoutMinutes * 60 * 1000);
+  const remainingMs = expiresAt - now;
+
+  if (remainingMs <= 0) {
+    elements.timerDisplay.textContent = '00:00';
+    elements.timerDisplay.className = 'timer-display critical';
+    // Server will handle game timeout and send match-end message
+    return;
+  }
+
+  const remainingMinutes = Math.floor(remainingMs / 60000);
+  const remainingSeconds = Math.floor((remainingMs % 60000) / 1000);
+  const timeString = `${String(remainingMinutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+  
+  elements.timerDisplay.textContent = timeString;
+
+  // Change color based on remaining time
+  if (remainingMs < 60000) { // Less than 1 minute
+    elements.timerDisplay.className = 'timer-display critical';
+  } else if (remainingMs < 180000) { // Less than 3 minutes
+    elements.timerDisplay.className = 'timer-display warning';
+  } else {
+    elements.timerDisplay.className = 'timer-display';
+  }
+}
+
+function startRoomTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+  if (elements.roomTimer) {
+    elements.roomTimer.style.display = 'flex';
+  }
+  updateRoomTimer();
+  timerInterval = setInterval(updateRoomTimer, 1000);
+}
+
+function hideRoomTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+  if (elements.roomTimer) {
+    elements.roomTimer.style.display = 'none';
+  }
+}
 
 // Session persistence functions
 function saveSession() {
@@ -227,13 +328,13 @@ elements.muteToggle.addEventListener('click', () => {
   state.muted = !state.muted;
   audio.muted = state.muted;
   elements.muteToggle.textContent = state.muted ? 'Muted' : 'Mute';
-  showStatus(state.muted ? 'Audio muted' : 'Audio on');
+  showToast(state.muted ? 'Audio muted' : 'Audio on', 'info', 2000);
 });
 
 elements.graphicsToggle.addEventListener('click', () => {
   state.lowGraphics = !state.lowGraphics;
   elements.graphicsToggle.textContent = `Low Graphics: ${state.lowGraphics ? 'On' : 'Off'}`;
-  showStatus(state.lowGraphics ? 'Low graphics enabled' : 'Low graphics disabled');
+  showToast(state.lowGraphics ? 'Low graphics enabled' : 'Low graphics disabled', 'info', 2000);
 });
 
 document.querySelectorAll('button[data-nav="splash"]').forEach((btn) => {
@@ -570,7 +671,7 @@ function leaveGame() {
   
   // Go to splash screen
   showScreen('splash');
-  showStatus('Left the game');
+  showToast('Left the game', 'info', 2000);
 }
 
 elements.actionButton.addEventListener('touchstart', (e) => {
@@ -743,6 +844,20 @@ function showScreen(name) {
   if (elements.effectLayer && name !== 'game') {
     clearEffectLayer();
   }
+
+  // Start or stop tip rotation based on screen
+  if (name === 'game') {
+    startTipRotation();
+  } else {
+    stopTipRotation();
+  }
+
+  // Show/hide room timer based on screen (only show during active game)
+  if (name === 'game') {
+    startRoomTimer();
+  } else {
+    hideRoomTimer();
+  }
 }
 
 function buildJoinUrl(roomId, name) {
@@ -843,12 +958,16 @@ function handleServerMessage(message) {
         state.joinUrl = buildJoinUrl(message.state.id, displayName);
       }
       updateFromSerializedState(message.state);
-      showStatus('Connected');
       handleStateTransition(message.state);
       
       // Save session and show leave button
       saveSession();
       elements.leaveGame.style.display = 'block';
+      
+      // Show connected toast after everything is ready
+      setTimeout(() => {
+        showToast('Connected', 'success', 2000);
+      }, 100);
       break;
     case 'lobby-update':
       updateFromSerializedState(message.state);
@@ -864,11 +983,12 @@ function handleServerMessage(message) {
       updateFromSerializedState(message.state);
       state.resultsState = null;
       showScreen('game');
+      startRoomTimer(); // Start countdown when game starts
       renderHud();
       break;
     case 'player-joined':
       if (message.playerId !== state.playerId) {
-        showStatus(`${message.playerName} joined the match`);
+        showToast(`${message.playerName} joined the match`, 'info', 3000);
         audio.playTone(550, 0.1, 0.08);
       }
       break;
@@ -881,11 +1001,12 @@ function handleServerMessage(message) {
       state.resultsState = message.state;
       renderResults(message);
       showScreen('results');
+      // Keep timer running in results
       break;
     case 'host-change':
       if (message.playerId === state.playerId) {
         state.isHost = true;
-        showStatus('You are now the host');
+        showToast('You are now the host', 'success', 3000);
       }
       break;
     case 'error':
@@ -928,6 +1049,10 @@ function updateFromSerializedState(serialized) {
 
   if (serialized.config) {
     state.config = serialized.config;
+    state.roomTimeoutMinutes = serialized.config.roomTimeoutMinutes;
+  }
+  if (serialized.gameStartedAt) {
+    state.roomCreatedAt = serialized.gameStartedAt;
   }
   if (serialized.players) {
     state.lastLobbyState = serialized;
@@ -1057,8 +1182,19 @@ function updateFromSerializedState(serialized) {
         enemy.dirX = 0;
         enemy.dirY = 0;
       } else {
-        const dx = previous ? enemy.x - previous.x : 0;
-        const dy = previous ? enemy.y - previous.y : 0;
+        // Store target position for interpolation
+        enemy.targetX = enemy.x;
+        enemy.targetY = enemy.y;
+        
+        // Interpolate position smoothly from previous to target
+        if (previous && previous.x !== undefined) {
+          const lerpFactor = 0.3; // 30% move towards target, 70% stay at current
+          enemy.x = previous.x * (1 - lerpFactor) + enemy.targetX * lerpFactor;
+          enemy.y = previous.y * (1 - lerpFactor) + enemy.targetY * lerpFactor;
+        }
+        
+        const dx = enemy.targetX - (previous ? previous.x : enemy.x);
+        const dy = enemy.targetY - (previous ? previous.y : enemy.y);
         const magnitude = Math.hypot(dx, dy);
         if (magnitude > 0.5) {
           // Smooth the direction change
@@ -1192,9 +1328,21 @@ function renderHud() {
 function renderResults(message) {
   const winnerId = message.winnerId || state.resultsState?.winnerId;
   const stateResults = message.state || state.resultsState;
+  const timedOut = message.timedOut || false;
   if (!stateResults) return;
-  const winner = stateResults.players?.find((p) => p.id === winnerId);
-  elements.winnerAnnouncement.textContent = winner ? `${winner.name} wins!` : 'Match complete';
+  
+  // Display appropriate message
+  if (timedOut) {
+    elements.winnerAnnouncement.textContent = 'Time Out!';
+  } else {
+    const winner = stateResults.players?.find((p) => p.id === winnerId);
+    elements.winnerAnnouncement.textContent = winner ? `${winner.name} wins!` : 'Match complete';
+    
+    // Trigger spectacular blast animation only for winners
+    if (winner) {
+      triggerWinnerBlastAnimation();
+    }
+  }
   elements.resultsList.innerHTML = '';
   const scores = stateResults.scores || stateResults.players || [];
   scores
@@ -1224,22 +1372,142 @@ function renderResults(message) {
   elements.rematch.disabled = !state.isHost;
 }
 
-function showStatus(message, isError = false, timeout = 4000) {
-  if (!elements.status) return;
-  elements.status.textContent = message;
-  elements.status.classList.toggle('error', Boolean(isError));
-  elements.status.classList.add('show');
-  if (timeout) {
-    clearTimeout(elements.status._hideTimer);
-    elements.status._hideTimer = setTimeout(() => {
-      elements.status.classList.remove('show');
-    }, timeout);
+function showToast(message, type = 'info', duration = 4000) {
+  if (!elements.toastContainer) return;
+
+  // Create toast element
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
+
+  // Add to container
+  elements.toastContainer.appendChild(toast);
+
+  // Auto-remove after duration
+  if (duration > 0) {
+    setTimeout(() => {
+      toast.classList.add('removing');
+      setTimeout(() => {
+        if (toast.parentNode) {
+          toast.parentNode.removeChild(toast);
+        }
+      }, 300); // Match animation duration
+    }, duration);
   }
+
+  return toast;
+}
+
+// Backward compatibility wrapper
+function showStatus(message, isError = false, timeout = 4000) {
+  const type = isError ? 'error' : 'info';
+  return showToast(message, type, timeout);
+}
+
+function triggerWinnerBlastAnimation() {
+  const announcement = elements.winnerAnnouncement;
+  if (!announcement) return;
+  
+  // Add blast animation class
+  announcement.classList.add('winner-blast-active');
+  
+  // Create particle container
+  const particleContainer = document.createElement('div');
+  particleContainer.className = 'blast-particles-container';
+  announcement.appendChild(particleContainer);
+  
+  // Create multiple bursts of particles
+  const burstCount = 5;
+  const particlesPerBurst = 30;
+  
+  for (let burst = 0; burst < burstCount; burst++) {
+    setTimeout(() => {
+      createParticleBurst(particleContainer, particlesPerBurst);
+    }, burst * 300);
+  }
+  
+  // Create continuous sparkles
+  const sparkleInterval = setInterval(() => {
+    createSparkle(particleContainer);
+  }, 50);
+  
+  // Clean up after animation completes
+  setTimeout(() => {
+    announcement.classList.remove('winner-blast-active');
+    clearInterval(sparkleInterval);
+    if (particleContainer.parentNode) {
+      particleContainer.remove();
+    }
+  }, 5000);
+}
+
+function createParticleBurst(container, count) {
+  const colors = ['#FFD700', '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F', '#BB8FCE'];
+  
+  for (let i = 0; i < count; i++) {
+    const particle = document.createElement('div');
+    particle.className = 'blast-particle';
+    
+    const angle = (Math.PI * 2 * i) / count;
+    const velocity = 150 + Math.random() * 200;
+    const size = 4 + Math.random() * 8;
+    const color = colors[Math.floor(Math.random() * colors.length)];
+    const rotation = Math.random() * 360;
+    const duration = 1 + Math.random() * 1.5;
+    
+    particle.style.width = `${size}px`;
+    particle.style.height = `${size}px`;
+    particle.style.background = color;
+    particle.style.setProperty('--tx', `${Math.cos(angle) * velocity}px`);
+    particle.style.setProperty('--ty', `${Math.sin(angle) * velocity}px`);
+    particle.style.setProperty('--rotation', `${rotation}deg`);
+    particle.style.animationDuration = `${duration}s`;
+    
+    // Add glow effect
+    particle.style.boxShadow = `0 0 10px ${color}, 0 0 20px ${color}`;
+    
+    container.appendChild(particle);
+    
+    // Remove after animation
+    setTimeout(() => {
+      if (particle.parentNode) {
+        particle.remove();
+      }
+    }, duration * 1000);
+  }
+}
+
+function createSparkle(container) {
+  const sparkle = document.createElement('div');
+  sparkle.className = 'blast-sparkle';
+  
+  const x = -50 + Math.random() * 100;
+  const y = -50 + Math.random() * 100;
+  const size = 2 + Math.random() * 4;
+  const colors = ['#FFD700', '#FFFFFF', '#FFF59D'];
+  const color = colors[Math.floor(Math.random() * colors.length)];
+  
+  sparkle.style.left = `calc(50% + ${x}%)`;
+  sparkle.style.top = `calc(50% + ${y}%)`;
+  sparkle.style.width = `${size}px`;
+  sparkle.style.height = `${size}px`;
+  sparkle.style.background = color;
+  sparkle.style.boxShadow = `0 0 5px ${color}`;
+  
+  container.appendChild(sparkle);
+  
+  setTimeout(() => {
+    if (sparkle.parentNode) {
+      sparkle.remove();
+    }
+  }, 1000);
 }
 
 async function copyRoomLink() {
   if (!state.joinUrl) {
-    showStatus('No join link yet', true);
+    showToast('No join link yet', 'error', 3000);
     return;
   }
   try {
@@ -1247,10 +1515,10 @@ async function copyRoomLink() {
     const url = new URL(state.joinUrl);
     const cleanUrl = `${url.origin}${url.pathname}`;
     await navigator.clipboard.writeText(cleanUrl);
-    showStatus('Link copied');
+    showToast('Link copied!', 'success', 2000);
   } catch (err) {
     console.warn('Copy failed', err);
-    showStatus('Could not copy link', true);
+    showToast('Could not copy link', 'error', 3000);
   }
 }
 
@@ -1333,47 +1601,52 @@ function renderGameScene(game, timestamp) {
 }
 
 function drawBackdrop(width, height, timestamp) {
-  // Base dark background
-  ctx.fillStyle = '#0A0E13';
-  ctx.fillRect(0, 0, width, height);
+  // Draw background image if loaded, otherwise fallback to dark background
+  if (backgroundImage.complete && backgroundImage.naturalWidth > 0) {
+    ctx.drawImage(backgroundImage, 0, 0, width, height);
+  } else {
+    // Base dark background
+    ctx.fillStyle = '#0A0E13';
+    ctx.fillRect(0, 0, width, height);
 
-  // Animated grid pattern
-  ctx.strokeStyle = 'rgba(63, 77, 94, 0.15)';
-  ctx.lineWidth = 1.5;
-  const gridSize = 60;
-  const offset = (timestamp / 50) % gridSize;
-  
-  for (let x = -gridSize; x < width + gridSize; x += gridSize) {
-    ctx.beginPath();
-    ctx.moveTo(x + offset, 0);
-    ctx.lineTo(x + offset, height);
-    ctx.stroke();
-  }
-  for (let y = -gridSize; y < height + gridSize; y += gridSize) {
-    ctx.beginPath();
-    ctx.moveTo(0, y + offset);
-    ctx.lineTo(width, y + offset);
-    ctx.stroke();
-  }
-
-  // Crosshair intersections
-  ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
-  for (let x = 0; x < width; x += gridSize) {
-    for (let y = 0; y < height; y += gridSize) {
-      const actualX = (x + offset) % width;
-      const actualY = (y + offset) % height;
-      ctx.fillRect(actualX - 2, actualY - 2, 4, 4);
+    // Animated grid pattern
+    ctx.strokeStyle = 'rgba(63, 77, 94, 0.15)';
+    ctx.lineWidth = 1.5;
+    const gridSize = 60;
+    const offset = (timestamp / 50) % gridSize;
+    
+    for (let x = -gridSize; x < width + gridSize; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x + offset, 0);
+      ctx.lineTo(x + offset, height);
+      ctx.stroke();
     }
+    for (let y = -gridSize; y < height + gridSize; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y + offset);
+      ctx.lineTo(width, y + offset);
+      ctx.stroke();
+    }
+
+    // Crosshair intersections
+    ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
+    for (let x = 0; x < width; x += gridSize) {
+      for (let y = 0; y < height; y += gridSize) {
+        const actualX = (x + offset) % width;
+        const actualY = (y + offset) % height;
+        ctx.fillRect(actualX - 2, actualY - 2, 4, 4);
+      }
+    }
+
+    // Border accent lines
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.3)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(8, 8, width - 16, height - 16);
+
+    ctx.strokeStyle = 'rgba(22, 163, 74, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(4, 4, width - 8, height - 8);
   }
-
-  // Border accent lines
-  ctx.strokeStyle = 'rgba(245, 158, 11, 0.3)';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(8, 8, width - 16, height - 16);
-
-  ctx.strokeStyle = 'rgba(22, 163, 74, 0.2)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(4, 4, width - 8, height - 8);
 }
 
 function drawCoins(coins) {
@@ -1894,11 +2167,6 @@ function drawPlayers(players) {
       
       // Dashing effect
       if (!state.lowGraphics && player.dashing) {
-        ctx.fillStyle = isSelf ? 'rgba(22, 163, 74, 0.2)' : 'rgba(56, 189, 248, 0.2)';
-        ctx.beginPath();
-        ctx.arc(x, y, radius + 9, 0, Math.PI * 2);
-        ctx.fill();
-
         ctx.strokeStyle = '#F59E0B';
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -1928,14 +2196,6 @@ function drawPlayers(players) {
           ctx.save();
           ctx.translate(x, y);
           ctx.rotate(angle + Math.PI / 2); // Rotate to face direction (add 90deg because image faces up)
-          
-          // Draw shadow if not low graphics
-          if (!state.lowGraphics) {
-            ctx.globalAlpha = 0.3;
-            ctx.fillStyle = '#000';
-            ctx.fillRect(-size / 2 + 2, -size / 2 + 2, size, size);
-            ctx.globalAlpha = 1;
-          }
           
           ctx.drawImage(spaceshipImg, -size / 2, -size / 2, size, size);
           ctx.restore();
@@ -1972,13 +2232,6 @@ function drawPlayers(players) {
       
         // Powerup indicator - purple aura
         if (player.hasPowerup) {
-          if (!state.lowGraphics) {
-            ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
-            ctx.beginPath();
-            ctx.arc(x, y, radius * 2 + 10, 0, Math.PI * 2);
-            ctx.fill();
-          }
-          
           ctx.strokeStyle = '#A855F7';
           ctx.lineWidth = 2.5;
           ctx.beginPath();
@@ -1988,13 +2241,6 @@ function drawPlayers(players) {
         
         // Rapid-fire indicator - orange/red spinning aura
         if (player.hasRapidfire) {
-          if (!state.lowGraphics) {
-            ctx.fillStyle = 'rgba(251, 146, 60, 0.4)';
-            ctx.beginPath();
-            ctx.arc(x, y, radius * 2 + 12, 0, Math.PI * 2);
-            ctx.fill();
-          }
-          
           // Spinning arrows around player
           ctx.save();
           ctx.translate(x, y);
@@ -2031,18 +2277,28 @@ function drawPlayers(players) {
 
     // Player name with background
     ctx.fillStyle = 'rgba(10, 14, 19, 0.8)';
-    ctx.font = 'bold 13px "Segoe UI", sans-serif';
+    ctx.font = '13px "Product Sans", sans-serif';
     const textWidth = ctx.measureText(player.name).width;
-    ctx.fillRect(x - textWidth / 2 - 6, y - 34, textWidth + 12, 18);
+    const labelX = x - textWidth / 2 - 6;
+    const labelY = y - 50;
+    const labelWidth = textWidth + 12;
+    const labelHeight = 18;
+    const borderRadius = 10;
+    
+    // Draw rounded rectangle background
+    ctx.beginPath();
+    ctx.roundRect(labelX, labelY, labelWidth, labelHeight, borderRadius);
+    ctx.fill();
 
+    // Draw rounded rectangle border
     ctx.strokeStyle = isSelf ? '#F59E0B' : '#3F4D5E';
     ctx.lineWidth = 2;
-    ctx.strokeRect(x - textWidth / 2 - 6, y - 34, textWidth + 12, 18);
+    ctx.stroke();
 
     ctx.fillStyle = isSelf ? '#FBBF24' : '#FFFFFF';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(player.name, x, y - 25);
+    ctx.fillText(player.name, x, y - 41);
   });
 }
 
