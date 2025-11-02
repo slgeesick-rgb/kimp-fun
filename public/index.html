@@ -21,7 +21,7 @@
       <div id="status-banner" role="status" aria-live="polite"></div>
       <section id="splash-screen" class="screen active">
         <h1>Welcome to Kimp Fun</h1>
-        <p>Fast-paced co-op adventuring for up to 24 players.</p>
+        <p>Fast-paced co-op adventuring for up to 15 players.</p>
         <div class="actions">
           <button id="splash-create">Create Game</button>
           <button id="splash-join">Join Game</button>
@@ -34,11 +34,15 @@
           <label>Display Name
             <input type="text" id="create-name" maxlength="16" required />
           </label>
+          <label>Choose Your Spaceship <span style="color: #EF4444;">*</span>
+            <div id="create-spaceship-grid" class="spaceship-grid"></div>
+            <input type="hidden" id="create-spaceship" required />
+          </label>
           <label>Target Score
             <input type="number" id="create-target" value="50" min="10" max="500" />
           </label>
           <label>Max Players
-            <input type="number" id="create-max" value="24" min="2" max="48" />
+            <input type="number" id="create-max" value="15" min="2" max="15" />
           </label>
           <label>Room Passcode
             <input type="text" id="create-passcode" maxlength="32" placeholder="Optional" />
@@ -73,6 +77,10 @@
           <label>Display Name
             <input type="text" id="join-name" maxlength="16" required />
           </label>
+          <label>Choose Your Spaceship <span style="color: #EF4444;">*</span>
+            <div id="join-spaceship-grid" class="spaceship-grid"></div>
+            <input type="hidden" id="join-spaceship" required />
+          </label>
           <label>Passcode
             <input type="text" id="join-passcode" maxlength="32" placeholder="Optional" />
           </label>
@@ -106,7 +114,10 @@
             </div>
           </div>
         </div>
-        <canvas id="game-canvas" width="960" height="540"></canvas>
+        <div class="canvas-wrapper">
+          <canvas id="game-canvas" width="960" height="540"></canvas>
+          <div id="effect-layer" aria-hidden="true"></div>
+        </div>
         <div class="scoreboard">
           <h3>Scores</h3>
           <ul id="score-list"></ul>

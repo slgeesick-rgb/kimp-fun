@@ -17,10 +17,15 @@ const elements = {
   createPasscodeEnabled: document.getElementById('create-passcode-enabled'),
   createDeathPenalty: document.getElementById('create-death-penalty'),
   createTimeout: document.getElementById('create-timeout'),
+  createSpaceship: document.getElementById('create-spaceship'),
+  createSpaceshipGrid: document.getElementById('create-spaceship-grid'),
   joinForm: document.getElementById('join-form'),
   joinLink: document.getElementById('join-link'),
   joinName: document.getElementById('join-name'),
   joinPasscode: document.getElementById('join-passcode'),
+  joinSpaceship: document.getElementById('join-spaceship'),
+  joinSpaceshipGrid: document.getElementById('join-spaceship-grid'),
+  joinScreen: document.getElementById('join-screen'),
   playerList: document.getElementById('player-list'),
   roomId: document.getElementById('room-id'),
   roomConfig: document.getElementById('room-config'),
@@ -40,6 +45,7 @@ const elements = {
   joystick: document.getElementById('joystick'),
   joystickHandle: document.getElementById('joystick-handle'),
   canvas: document.getElementById('game-canvas'),
+  effectLayer: document.getElementById('effect-layer'),
   leaveGame: document.getElementById('leave-game'),
 };
 
@@ -55,6 +61,52 @@ ctx.imageSmoothingQuality = 'high';
 
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = `${wsProtocol}//${location.host}`;
+
+const assets = {
+  blast: '/assets/blast.gif',
+  enemy: '/assets/enemy.webp',
+};
+
+const WORLD_WIDTH = 1600;
+const WORLD_HEIGHT = 900;
+const PLAYER_WORLD_RADIUS = 18;
+const ENEMY_WORLD_RADIUS = 22;
+const BLAST_EFFECT_DURATION = 4000;
+const TOTAL_SPACESHIPS = 15;
+
+const blastPreload = new Image();
+blastPreload.src = assets.blast;
+
+const enemyImage = new Image();
+enemyImage.src = assets.enemy;
+
+// Preload spaceship images
+const spaceshipImages = {};
+let spaceshipsLoaded = 0;
+let cachedCreateSelection = null;
+let cachedJoinSelection = null;
+let joinAvailabilityTimer = null;
+for (let i = 1; i <= TOTAL_SPACESHIPS; i++) {
+  const img = new Image();
+  img.onload = () => {
+    console.debug(`Spaceship ${i} loaded`);
+    spaceshipsLoaded++;
+    if (spaceshipsLoaded === TOTAL_SPACESHIPS) {
+      console.debug('All spaceships loaded');
+      // Re-render any visible spaceship grids
+      if (elements.createSpaceshipGrid && elements.createSpaceshipGrid.offsetParent !== null) {
+        renderSpaceshipGrid(elements.createSpaceshipGrid, elements.createSpaceship);
+      }
+      if (elements.joinSpaceshipGrid && elements.joinSpaceshipGrid.offsetParent !== null) {
+        renderSpaceshipGrid(elements.joinSpaceshipGrid, elements.joinSpaceship);
+      }
+    }
+  };
+  img.onerror = () => console.error(`Failed to load spaceship ${i}`);
+  img.src = `/assets/players/player${i}.webp`;
+  spaceshipImages[i] = img;
+}
+console.debug('Started loading', TOTAL_SPACESHIPS, 'spaceships');
 
 const state = {
   screen: 'splash',
@@ -74,12 +126,19 @@ const state = {
   muted: false,
   inputSeq: 0,
   pendingAction: false,
+  pendingPowerup: false,
   keyboardDir: { x: 0, y: 0 },
   joystickDir: { x: 0, y: 0 },
   combinedDir: { x: 0, y: 0 },
   lastScores: new Map(),
   scoreHistory: new Map(),
   leavingPlayers: new Map(), // playerId -> { x, y, startTime, animationTime }
+  powerupEffects: [], // Array of { x, y, startTime, duration }
+  respawnEffects: new Map(), // playerId -> { x, y, startTime, duration }
+  selectedSpaceship: null,
+  takenSpaceships: new Set(), // Track which spaceships are taken in the room
+  lastFetchedRoomId: null,
+  lastRoomFetchTimestamp: 0,
 };
 
 // Session persistence functions
@@ -92,6 +151,7 @@ function saveSession() {
       hostKey: state.hostKey,
       passcode: state.passcode,
       joinUrl: state.joinUrl,
+      spaceship: state.selectedSpaceship,
       timestamp: Date.now()
     };
     sessionStorage.setItem('kimpfun_session', JSON.stringify(session));
@@ -181,12 +241,34 @@ document.querySelectorAll('button[data-nav="splash"]').forEach((btn) => {
 });
 
 elements.splashCreate.addEventListener('click', () => {
+  cachedJoinSelection = state.selectedSpaceship;
+  state.selectedSpaceship = cachedCreateSelection;
+  elements.createSpaceship.value = cachedCreateSelection ? String(cachedCreateSelection) : '';
+  state.takenSpaceships.clear();
+  state.lastFetchedRoomId = null;
+  state.lastRoomFetchTimestamp = 0;
   showScreen('create');
+  renderSpaceshipGrid(elements.createSpaceshipGrid, elements.createSpaceship);
   elements.createName.focus();
 });
 
 elements.splashJoin.addEventListener('click', () => {
+  cachedCreateSelection = state.selectedSpaceship;
+  state.selectedSpaceship = cachedJoinSelection;
+  elements.joinSpaceship.value = cachedJoinSelection ? String(cachedJoinSelection) : '';
   showScreen('join');
+  if (!elements.joinLink.value) {
+    state.takenSpaceships.clear();
+    state.lastFetchedRoomId = null;
+    state.lastRoomFetchTimestamp = 0;
+    cachedJoinSelection = null;
+    state.selectedSpaceship = null;
+    elements.joinSpaceship.value = '';
+  }
+  renderSpaceshipGrid(elements.joinSpaceshipGrid, elements.joinSpaceship);
+  if (elements.joinLink.value) {
+    scheduleRoomAvailabilityFetch(elements.joinLink.value);
+  }
   elements.joinLink.focus();
 });
 
@@ -198,8 +280,170 @@ elements.createPasscodeEnabled.addEventListener('change', (event) => {
   }
 });
 
+// Spaceship selection functions
+function renderSpaceshipGrid(gridElement, inputElement) {
+  gridElement.innerHTML = '';
+  for (let i = 1; i <= TOTAL_SPACESHIPS; i++) {
+    const isTaken = state.takenSpaceships.has(i);
+
+    if (gridElement.id === 'join-spaceship-grid' && isTaken) {
+      continue; // Hide taken ships in the join grid
+    }
+
+    const option = document.createElement('div');
+    option.className = 'spaceship-option';
+    option.dataset.spaceship = i;
+
+    // Use preloaded image if available, otherwise create new one
+    const preloadedImg = spaceshipImages[i];
+    if (preloadedImg && preloadedImg.complete) {
+      const img = document.createElement('img');
+      img.src = preloadedImg.src;
+      img.alt = `Spaceship ${i}`;
+      img.draggable = false;
+      option.appendChild(img);
+    } else {
+      // Fallback: create new image element
+      const img = document.createElement('img');
+      img.src = `/assets/players/player${i}.webp`;
+      img.alt = `Spaceship ${i}`;
+      img.draggable = false;
+      option.appendChild(img);
+    }
+
+    // Check if this spaceship is taken
+    if (isTaken) {
+      option.classList.add('taken');
+    } else {
+      option.addEventListener('click', () => {
+        if (!state.takenSpaceships.has(i)) {
+          selectSpaceship(gridElement, inputElement, i);
+        }
+      });
+    }
+    
+    // Mark as selected if it's the current selection
+    if (state.selectedSpaceship === i) {
+      option.classList.add('selected');
+      inputElement.value = i;
+    }
+    
+    gridElement.appendChild(option);
+  }
+
+  if (gridElement.id === 'join-spaceship-grid') {
+    const noAvailable = gridElement.childElementCount === 0 && state.takenSpaceships.size >= TOTAL_SPACESHIPS;
+    gridElement.classList.toggle('no-available', noAvailable);
+  }
+}
+
+function selectSpaceship(gridElement, inputElement, spaceshipId) {
+  state.selectedSpaceship = spaceshipId;
+  inputElement.value = spaceshipId;
+  if (gridElement.id === 'create-spaceship-grid') {
+    cachedCreateSelection = spaceshipId;
+  } else if (gridElement.id === 'join-spaceship-grid') {
+    cachedJoinSelection = spaceshipId;
+  }
+  
+  // Update UI
+  gridElement.querySelectorAll('.spaceship-option').forEach(opt => {
+    opt.classList.remove('selected');
+    if (parseInt(opt.dataset.spaceship) === spaceshipId) {
+      opt.classList.add('selected');
+    }
+  });
+}
+
+function updateTakenSpaceships(players) {
+  state.takenSpaceships.clear();
+  if (players) {
+    players.forEach(player => {
+      if (player.spaceship && player.id !== state.playerId) {
+        state.takenSpaceships.add(player.spaceship);
+      }
+    });
+  }
+
+  const joinScreenActive = elements.joinScreen && elements.joinScreen.classList.contains('active');
+  const joinSelectionTaken = cachedJoinSelection && state.takenSpaceships.has(cachedJoinSelection);
+
+  if (joinSelectionTaken) {
+    cachedJoinSelection = null;
+  }
+
+  if (joinScreenActive) {
+    state.selectedSpaceship = cachedJoinSelection;
+    if (elements.joinSpaceship) {
+      elements.joinSpaceship.value = cachedJoinSelection ? String(cachedJoinSelection) : '';
+    }
+    renderSpaceshipGrid(elements.joinSpaceshipGrid, elements.joinSpaceship);
+  }
+}
+
+const ROOM_AVAILABILITY_DEBOUNCE_MS = 300;
+
+function scheduleRoomAvailabilityFetch(rawValue) {
+  clearTimeout(joinAvailabilityTimer);
+  joinAvailabilityTimer = setTimeout(() => {
+    const roomId = parseRoomId(rawValue);
+    if (roomId) {
+      if (state.lastFetchedRoomId && state.lastFetchedRoomId !== roomId) {
+        state.takenSpaceships.clear();
+        state.lastFetchedRoomId = null;
+        state.lastRoomFetchTimestamp = 0;
+        cachedJoinSelection = null;
+        if (elements.joinScreen && elements.joinScreen.classList.contains('active')) {
+          state.selectedSpaceship = null;
+          if (elements.joinSpaceship) {
+            elements.joinSpaceship.value = '';
+          }
+          renderSpaceshipGrid(elements.joinSpaceshipGrid, elements.joinSpaceship);
+        }
+      }
+      fetchRoomAvailability(roomId);
+    }
+  }, ROOM_AVAILABILITY_DEBOUNCE_MS);
+}
+
+async function fetchRoomAvailability(roomId, { force = false } = {}) {
+  if (!roomId) return;
+
+  const now = Date.now();
+  if (!force && state.lastFetchedRoomId === roomId && now - state.lastRoomFetchTimestamp < 2000) {
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/room/${roomId}`);
+    if (response.status === 404) {
+      state.lastFetchedRoomId = null;
+      state.lastRoomFetchTimestamp = now;
+      updateTakenSpaceships([]);
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(`Room lookup failed (${response.status})`);
+    }
+
+    const data = await response.json();
+    state.lastFetchedRoomId = roomId;
+    state.lastRoomFetchTimestamp = Date.now();
+    updateTakenSpaceships(data.players || []);
+  } catch (err) {
+    console.warn('Room availability check failed', err);
+  }
+}
+
 elements.createForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  
+  if (!state.selectedSpaceship || !elements.createSpaceship.value) {
+    showStatus('⚠️ Please select a spaceship first', true);
+    elements.createSpaceshipGrid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  
   const payload = {
     name: elements.createName.value,
     targetScore: Number(elements.createTarget.value),
@@ -232,6 +476,7 @@ elements.createForm.addEventListener('submit', async (event) => {
       name: elements.createName.value,
       hostKey: state.hostKey,
       passcode: payload.passcode,
+      spaceship: state.selectedSpaceship,
     });
   } catch (err) {
     console.error(err);
@@ -246,6 +491,13 @@ elements.joinForm.addEventListener('submit', (event) => {
     showStatus('Enter a valid room link or ID', true);
     return;
   }
+  
+  if (!state.selectedSpaceship || !elements.joinSpaceship.value) {
+    showStatus('⚠️ Please select a spaceship first', true);
+    elements.joinSpaceshipGrid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  
   state.roomId = roomId;
   state.hostKey = null;
   state.joinUrl = buildJoinUrl(roomId, elements.joinName.value);
@@ -255,7 +507,20 @@ elements.joinForm.addEventListener('submit', (event) => {
     roomId,
     name: elements.joinName.value,
     passcode: state.passcode,
+    spaceship: state.selectedSpaceship,
   });
+});
+
+elements.joinLink.addEventListener('input', () => {
+  if (elements.joinScreen && elements.joinScreen.classList.contains('active')) {
+    scheduleRoomAvailabilityFetch(elements.joinLink.value);
+  }
+});
+
+elements.joinLink.addEventListener('blur', () => {
+  if (elements.joinScreen && elements.joinScreen.classList.contains('active')) {
+    scheduleRoomAvailabilityFetch(elements.joinLink.value);
+  }
 });
 
 elements.copyLink.addEventListener('click', () => copyRoomLink());
@@ -298,6 +563,8 @@ function leaveGame() {
   state.gameState = null;
   state.resultsState = null;
   
+  clearEffectLayer();
+
   // Hide leave button
   elements.leaveGame.style.display = 'none';
   
@@ -345,7 +612,7 @@ const heldKeys = new Set();
 window.addEventListener('keydown', (event) => {
   if (event.repeat) return;
   if (event.code === 'Space') {
-    queueAction();
+    queuePowerup();
     event.preventDefault();
     return;
   }
@@ -366,6 +633,10 @@ setupJoystick();
 
 function queueAction() {
   state.pendingAction = true;
+}
+
+function queuePowerup() {
+  state.pendingPowerup = true;
 }
 
 function updateKeyboardDir() {
@@ -468,6 +739,10 @@ function showScreen(name) {
     el.classList.toggle('active', key === name);
   });
   state.screen = name;
+
+  if (elements.effectLayer && name !== 'game') {
+    clearEffectLayer();
+  }
 }
 
 function buildJoinUrl(roomId, name) {
@@ -487,21 +762,21 @@ function parseRoomId(input) {
     const parts = url.pathname.split('/').filter(Boolean);
     const idx = parts.findIndex((p) => p.toLowerCase() === 'play');
     if (idx >= 0 && parts[idx + 1]) {
-      return parts[idx + 1];
+      return parts[idx + 1].toLowerCase();
     }
     if (parts.length) {
-      return parts[parts.length - 1];
+      return parts[parts.length - 1].toLowerCase();
     }
   } catch (err) {
     // Not a full URL, treat as ID
   }
-  if (/^[a-f0-9]{8}$/.test(trimmed)) {
-    return trimmed;
+  if (/^[a-f0-9]{8}$/i.test(trimmed)) {
+    return trimmed.toLowerCase();
   }
   return null;
 }
 
-function connectSocket({ roomId, name, hostKey, passcode }) {
+function connectSocket({ roomId, name, hostKey, passcode, spaceship }) {
   if (!roomId || !name) {
     showStatus('Missing room or name', true);
     return;
@@ -522,6 +797,7 @@ function connectSocket({ roomId, name, hostKey, passcode }) {
       name,
       hostKey,
       passcode,
+      spaceship: spaceship || state.selectedSpaceship,
     });
   });
 
@@ -614,6 +890,13 @@ function handleServerMessage(message) {
       break;
     case 'error':
       showStatus(message.message || 'Server error', true);
+      if (
+        elements.joinScreen &&
+        elements.joinScreen.classList.contains('active') &&
+        state.roomId
+      ) {
+        fetchRoomAvailability(state.roomId, { force: true });
+      }
       break;
     default:
       break;
@@ -637,19 +920,74 @@ function handleStateTransition(serialized) {
 
 function updateFromSerializedState(serialized) {
   if (!serialized) return;
+
+  const previousPlayersArray = state.gameState?.players || [];
+  const previousPlayers = new Map(previousPlayersArray.map((player) => [player.id, player]));
+  const previousEnemiesArray = state.gameState?.enemies || [];
+  const previousEnemies = new Map(previousEnemiesArray.map((enemy) => [enemy.id, enemy]));
+
   if (serialized.config) {
     state.config = serialized.config;
   }
   if (serialized.players) {
     state.lastLobbyState = serialized;
+    updateTakenSpaceships(serialized.players);
   }
   if (serialized.state === 'running') {
-    // Detect players that left (were in previous state but not in new state)
-    if (state.gameState && state.gameState.players) {
-      const newPlayerIds = new Set((serialized.players || []).map(p => p.id));
-      const oldPlayers = state.gameState.players || [];
-      
-      oldPlayers.forEach(oldPlayer => {
+    const newPlayers = serialized.players || [];
+
+    newPlayers.forEach((player) => {
+      const previous = previousPlayers.get(player.id);
+      if (!player.alive) {
+        player.dirX = 0;
+        player.dirY = 0;
+        player.displayAngle = 0;
+        return;
+      }
+      const dx = previous ? player.x - previous.x : 0;
+      const dy = previous ? player.y - previous.y : 0;
+      const magnitude = Math.hypot(dx, dy);
+      if (magnitude > 0.5) {
+        const targetDirX = dx / magnitude;
+        const targetDirY = dy / magnitude;
+        
+        // Smooth rotation interpolation
+        if (previous && (previous.dirX || previous.dirY)) {
+          const smoothing = 0.3; // 30% new direction, 70% old direction
+          player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
+          player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
+          
+          // Normalize
+          const newMagnitude = Math.hypot(player.dirX, player.dirY);
+          if (newMagnitude > 0) {
+            player.dirX /= newMagnitude;
+            player.dirY /= newMagnitude;
+          }
+        } else {
+          player.dirX = targetDirX;
+          player.dirY = targetDirY;
+        }
+        
+        // Calculate display angle for rendering
+        player.displayAngle = Math.atan2(player.dirY, player.dirX);
+      } else {
+        // Keep previous direction when not moving significantly
+        if (previous && (previous.dirX || previous.dirY)) {
+          player.dirX = previous.dirX;
+          player.dirY = previous.dirY;
+          player.displayAngle = previous.displayAngle || Math.atan2(previous.dirY, previous.dirX);
+        } else {
+          player.dirX = 0;
+          player.dirY = 0;
+          player.displayAngle = 0;
+        }
+      }
+    });
+
+    if (previousPlayersArray.length) {
+      const newPlayerIds = new Set(newPlayers.map((player) => player.id));
+
+      previousPlayersArray.forEach((oldPlayer) => {
         if (!newPlayerIds.has(oldPlayer.id)) {
           // Player left - start leave animation
           state.leavingPlayers.set(oldPlayer.id, {
@@ -657,14 +995,14 @@ function updateFromSerializedState(serialized) {
             y: oldPlayer.y,
             name: oldPlayer.name,
             startTime: Date.now(),
-            animationDuration: 400 // 400ms animation
+            animationDuration: 400, // 400ms animation
           });
-          
+
           // Play leave sound effect (descending tone)
           if (oldPlayer.id !== state.playerId) {
             audio.playTone(400, 0.15, 0.1);
           }
-          
+
           // Remove from animation list after animation completes
           setTimeout(() => {
             state.leavingPlayers.delete(oldPlayer.id);
@@ -672,7 +1010,92 @@ function updateFromSerializedState(serialized) {
         }
       });
     }
-    
+
+    // Detect powerup usage (player had powerup, now doesn't)
+    newPlayers.forEach((player) => {
+      const previous = previousPlayers.get(player.id);
+      if (previous && previous.hasPowerup && !player.hasPowerup) {
+        state.powerupEffects.push({
+          x: player.x,
+          y: player.y,
+          startTime: Date.now(),
+          duration: 600,
+        });
+
+        audio.playTone(800, 0.2, 0.1);
+        setTimeout(() => audio.playTone(600, 0.15, 0.1), 100);
+      }
+    });
+
+    // Trigger death effects for players that just died
+    newPlayers.forEach((player) => {
+      const previous = previousPlayers.get(player.id);
+      if (previous && previous.alive && !player.alive) {
+        spawnDeathEffect(player.x, player.y, PLAYER_WORLD_RADIUS);
+      }
+      // Trigger respawn effects for players that just respawned
+      if (previous && !previous.alive && player.alive) {
+        state.respawnEffects.set(player.id, {
+          x: player.x,
+          y: player.y,
+          startTime: Date.now(),
+          duration: 1500, // 1.5 seconds blink/glow effect
+        });
+      }
+    });
+
+    // Trigger death effects for enemies that were killed or removed
+    const newEnemies = serialized.enemies || [];
+    const currentEnemies = new Map();
+
+    newEnemies.forEach((enemy) => {
+      const previous = previousEnemies.get(enemy.id);
+      if (previous && previous.active && enemy.active === false) {
+        spawnDeathEffect(enemy.x, enemy.y, ENEMY_WORLD_RADIUS);
+      }
+      if (enemy.active === false) {
+        enemy.dirX = 0;
+        enemy.dirY = 0;
+      } else {
+        const dx = previous ? enemy.x - previous.x : 0;
+        const dy = previous ? enemy.y - previous.y : 0;
+        const magnitude = Math.hypot(dx, dy);
+        if (magnitude > 0.5) {
+          // Smooth the direction change
+          const newDirX = dx / magnitude;
+          const newDirY = dy / magnitude;
+          if (previous && previous.dirX !== undefined) {
+            // Blend with previous direction for smoothness
+            enemy.dirX = previous.dirX * 0.7 + newDirX * 0.3;
+            enemy.dirY = previous.dirY * 0.7 + newDirY * 0.3;
+            // Re-normalize
+            const mag = Math.hypot(enemy.dirX, enemy.dirY);
+            if (mag > 0) {
+              enemy.dirX /= mag;
+              enemy.dirY /= mag;
+            }
+          } else {
+            enemy.dirX = newDirX;
+            enemy.dirY = newDirY;
+          }
+        } else if (previous && previous.dirX !== undefined) {
+          // Keep previous direction if barely moving
+          enemy.dirX = previous.dirX;
+          enemy.dirY = previous.dirY;
+        } else {
+          enemy.dirX = 0;
+          enemy.dirY = 0;
+        }
+      }
+      currentEnemies.set(enemy.id, enemy);
+    });
+
+    previousEnemies.forEach((enemy, id) => {
+      if (!currentEnemies.has(id)) {
+        spawnDeathEffect(enemy.x, enemy.y, ENEMY_WORLD_RADIUS);
+      }
+    });
+
     state.gameState = serialized;
   }
   if (serialized.state === 'results') {
@@ -697,6 +1120,16 @@ function renderLobby() {
     .sort((a, b) => a.name.localeCompare(b.name))
     .forEach((player) => {
       const li = document.createElement('li');
+      
+      // Add spaceship icon if available
+      if (player.spaceship) {
+        const spaceshipIcon = document.createElement('img');
+        spaceshipIcon.src = `/assets/players/player${player.spaceship}.webp`;
+        spaceshipIcon.className = 'player-spaceship-icon';
+        spaceshipIcon.alt = `Spaceship ${player.spaceship}`;
+        li.appendChild(spaceshipIcon);
+      }
+      
       const name = document.createElement('span');
       name.textContent = player.name;
       if (player.id === state.playerId) {
@@ -730,7 +1163,20 @@ function renderHud() {
   elements.scoreList.innerHTML = '';
   sorted.slice(0, 8).forEach((player) => {
     const li = document.createElement('li');
-    li.textContent = `${player.name}${player.id === state.playerId ? ' (You)' : ''}`;
+    
+    // Add spaceship icon if available
+    if (player.spaceship) {
+      const spaceshipIcon = document.createElement('img');
+      spaceshipIcon.src = `/assets/players/player${player.spaceship}.webp`;
+      spaceshipIcon.className = 'player-spaceship-icon';
+      spaceshipIcon.alt = `Spaceship ${player.spaceship}`;
+      li.appendChild(spaceshipIcon);
+    }
+    
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = `${player.name}${player.id === state.playerId ? ' (You)' : ''}`;
+    li.appendChild(nameSpan);
+    
     const score = document.createElement('span');
     score.textContent = `${player.score} pts`;
     li.appendChild(score);
@@ -756,7 +1202,20 @@ function renderResults(message) {
     .sort((a, b) => b.score - a.score)
     .forEach((entry, index) => {
       const li = document.createElement('li');
-      li.textContent = `${index + 1}. ${entry.name}${entry.id === state.playerId ? ' (You)' : ''}`;
+      
+      // Add spaceship icon if available
+      if (entry.spaceship) {
+        const spaceshipIcon = document.createElement('img');
+        spaceshipIcon.src = `/assets/players/player${entry.spaceship}.webp`;
+        spaceshipIcon.className = 'player-spaceship-icon';
+        spaceshipIcon.alt = `Spaceship ${entry.spaceship}`;
+        li.appendChild(spaceshipIcon);
+      }
+      
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = `${index + 1}. ${entry.name}${entry.id === state.playerId ? ' (You)' : ''}`;
+      li.appendChild(nameSpan);
+      
       const score = document.createElement('span');
       score.textContent = `${entry.score} pts`;
       li.appendChild(score);
@@ -821,8 +1280,10 @@ setInterval(() => {
     seq: state.inputSeq,
     dir: state.combinedDir,
     action: state.pendingAction,
+    powerup: state.pendingPowerup,
   };
   state.pendingAction = false;
+  state.pendingPowerup = false;
   sendMessage(payload);
 }, 50);
 
@@ -857,8 +1318,12 @@ function renderGameScene(game, timestamp) {
   }
 
   drawCoins(game.coins || []);
+  drawPowerups(game.powerups || [], timestamp);
+  drawRapidfires(game.rapidfires || [], timestamp);
   drawEnemies(game.enemies || []);
+  drawBullets(game.bullets || [], timestamp);
   drawPlayers(game.players || []);
+  drawPowerupEffects(timestamp);
   drawLeavingPlayers(timestamp);
 
   if (game.state === 'results') {
@@ -921,32 +1386,257 @@ function drawCoins(coins) {
     // Outer glow circle
     ctx.fillStyle = 'rgba(245, 158, 11, 0.2)';
     ctx.beginPath();
-    ctx.arc(x, y, 16, 0, Math.PI * 2);
+    ctx.arc(x, y, 12, 0, Math.PI * 2);
     ctx.fill();
 
     // Main coin body
     ctx.fillStyle = '#F59E0B';
     ctx.beginPath();
-    ctx.arc(x, y, 11, 0, Math.PI * 2);
+    ctx.arc(x, y, 8, 0, Math.PI * 2);
     ctx.fill();
 
     // Coin border
     ctx.strokeStyle = '#B45309';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1.5;
     ctx.stroke();
 
     // Inner highlight
     ctx.fillStyle = '#FCD34D';
     ctx.beginPath();
-    ctx.arc(x - 2, y - 2, 5, 0, Math.PI * 2);
+    ctx.arc(x - 1.5, y - 1.5, 3.5, 0, Math.PI * 2);
     ctx.fill();
 
     // Center dot
     ctx.fillStyle = '#FBBF24';
     ctx.beginPath();
-    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.arc(x, y, 2, 0, Math.PI * 2);
     ctx.fill();
   });
+}
+
+function drawPowerups(powerups, timestamp) {
+  const scaleX = canvasScaleX();
+  const scaleY = canvasScaleY();
+  powerups.forEach((powerup) => {
+    const x = powerup.x * scaleX;
+    const y = powerup.y * scaleY;
+    
+    // Pulsing animation
+    const pulse = Math.sin(timestamp / 200) * 0.3 + 1;
+    const radius = 11 * pulse;
+    
+    // Outer energy ring
+    if (!state.lowGraphics) {
+      ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
+      ctx.beginPath();
+      ctx.arc(x, y, radius + 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    // Main powerup body - star shape
+    ctx.fillStyle = '#A855F7';
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = (i * Math.PI) / 4 + timestamp / 1000;
+      const r = i % 2 === 0 ? radius : radius * 0.5;
+      const px = x + Math.cos(angle) * r;
+      const py = y + Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    
+    // Border
+    ctx.strokeStyle = '#7C3AED';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Inner core
+    ctx.fillStyle = '#C084FC';
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Bright center
+    ctx.fillStyle = '#E9D5FF';
+    ctx.beginPath();
+    ctx.arc(x - 1.5, y - 1.5, radius * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawRapidfires(rapidfires, timestamp) {
+  const scaleX = canvasScaleX();
+  const scaleY = canvasScaleY();
+  rapidfires.forEach((rapidfire) => {
+    const x = rapidfire.x * scaleX;
+    const y = rapidfire.y * scaleY;
+    
+    // Pulsing animation (faster than powerups)
+    const pulse = Math.sin(timestamp / 150) * 0.4 + 1;
+    const radius = 12 * pulse;
+    
+    // Outer energy ring - orange/red glow
+    if (!state.lowGraphics) {
+      ctx.fillStyle = 'rgba(251, 146, 60, 0.4)';
+      ctx.beginPath();
+      ctx.arc(x, y, radius + 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    // Main rapidfire body - double chevron/arrow shape pointing outward
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(timestamp / 500); // Spin faster than powerups
+    
+    // Draw three arrows pointing outward
+    for (let a = 0; a < 3; a++) {
+      ctx.save();
+      ctx.rotate((a * Math.PI * 2) / 3);
+      
+      // Arrow body
+      ctx.fillStyle = '#FB923C';
+      ctx.beginPath();
+      ctx.moveTo(0, -radius * 0.3);
+      ctx.lineTo(radius * 0.5, -radius * 0.3);
+      ctx.lineTo(radius * 0.8, 0);
+      ctx.lineTo(radius * 0.5, radius * 0.3);
+      ctx.lineTo(0, radius * 0.3);
+      ctx.closePath();
+      ctx.fill();
+      
+      ctx.restore();
+    }
+    
+    ctx.restore();
+    
+    // Center circle
+    ctx.fillStyle = '#F97316';
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Border on center
+    ctx.strokeStyle = '#EA580C';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Bright center highlight
+    ctx.fillStyle = '#FED7AA';
+    ctx.beginPath();
+    ctx.arc(x - 1.5, y - 1.5, radius * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawBullets(bullets, timestamp) {
+  const scaleX = canvasScaleX();
+  const scaleY = canvasScaleY();
+  
+  bullets.forEach((bullet) => {
+    const x = bullet.x * scaleX;
+    const y = bullet.y * scaleY;
+    
+    // Calculate bullet direction for gradient
+    const speed = Math.hypot(bullet.vx, bullet.vy);
+    const dirX = bullet.vx / speed;
+    const dirY = bullet.vy / speed;
+    
+    // Bullet size
+    const radius = 5;
+    const tailLength = 15;
+    
+    // Draw bullet tail (trail effect)
+    if (!state.lowGraphics) {
+      const gradient = ctx.createLinearGradient(
+        x - dirX * tailLength, 
+        y - dirY * tailLength,
+        x,
+        y
+      );
+      gradient.addColorStop(0, 'rgba(251, 146, 60, 0)');
+      gradient.addColorStop(0.5, 'rgba(251, 146, 60, 0.6)');
+      gradient.addColorStop(1, 'rgba(249, 115, 22, 1)');
+      
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x - dirX * tailLength, y - dirY * tailLength);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+    
+    // Draw bullet body with gradient
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    gradient.addColorStop(0, '#FFFFFF');
+    gradient.addColorStop(0.3, '#FED7AA');
+    gradient.addColorStop(0.6, '#FB923C');
+    gradient.addColorStop(1, '#F97316');
+    
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Outer glow
+    if (!state.lowGraphics) {
+      ctx.fillStyle = 'rgba(251, 146, 60, 0.4)';
+      ctx.beginPath();
+      ctx.arc(x, y, radius + 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    // Bright center highlight
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(x - 1, y - 1, radius * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+// Draw a small triangular pointer indicating an entity's movement direction.
+function drawDirectionNotch(x, y, radius, dirX, dirY, options = {}) {
+  const magnitude = Math.hypot(dirX, dirY);
+  if (magnitude < 0.01) return;
+
+  const {
+    fill = '#FFFFFF',
+    stroke = '#1E293B',
+    tipOffset = 8,
+    baseOffset = 0,
+    halfWidth = 4,
+    lineWidth = 1.25,
+  } = options;
+
+  const nx = dirX / magnitude;
+  const ny = dirY / magnitude;
+  const baseDistance = radius + baseOffset;
+  const tipDistance = radius + tipOffset;
+  const baseX = x + nx * baseDistance;
+  const baseY = y + ny * baseDistance;
+  const tipX = x + nx * tipDistance;
+  const tipY = y + ny * tipDistance;
+  const perpX = -ny;
+  const perpY = nx;
+  const leftX = baseX + perpX * halfWidth;
+  const leftY = baseY + perpY * halfWidth;
+  const rightX = baseX - perpX * halfWidth;
+  const rightY = baseY - perpY * halfWidth;
+
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(leftX, leftY);
+  ctx.lineTo(rightX, rightY);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+  }
 }
 
 function drawEnemies(enemies) {
@@ -958,47 +1648,168 @@ function drawEnemies(enemies) {
     
     if (enemy.active === false) {
       // Defeated enemy
-      ctx.fillStyle = 'rgba(100, 116, 139, 0.3)';
-      ctx.beginPath();
-      ctx.arc(x, y, 8, 0, Math.PI * 2);
-      ctx.fill();
-      
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    } else {
-      // Active enemy with danger indicator
-      if (!state.lowGraphics) {
-        ctx.fillStyle = 'rgba(225, 29, 72, 0.15)';
+      if (enemyImage && enemyImage.complete) {
+        const size = 24; // Small defeated size (maintains aspect ratio)
+        ctx.save();
+        ctx.globalAlpha = 0.3;
+        ctx.filter = 'grayscale(100%)';
+        ctx.translate(x, y);
+        ctx.drawImage(enemyImage, -size / 2, -size / 2, size, size);
+        ctx.restore();
+      } else {
+        // Fallback circle
+        ctx.fillStyle = 'rgba(100, 116, 139, 0.3)';
         ctx.beginPath();
-        ctx.arc(x, y, 24, 0, Math.PI * 2);
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
         ctx.fill();
+        
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
       }
+    } else {
+      // Draw fire tail for active enemies if moving
+      const isMoving = Math.hypot(enemy.dirX || 0, enemy.dirY || 0) > 0.01;
+      if (isMoving && !state.lowGraphics) {
+        drawFireTail(x, y, enemy.dirX || 0, enemy.dirY || 0, 20, Date.now());
+      }
+      
+      // Active enemy with spaceship image
+      if (enemyImage && enemyImage.complete) {
+        const size = 40; // Enemy image size (maintains aspect ratio)
+        const angle = (enemy.dirX || enemy.dirY) ? Math.atan2(enemy.dirY || 0, enemy.dirX || 0) : 0;
+        
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle + Math.PI / 2); // Rotate to face direction (add 90deg because image faces up)
+        
+        ctx.drawImage(enemyImage, -size / 2, -size / 2, size, size);
+        ctx.restore();
+      } else {
+        // Fallback to original colored circle design
+        if (!state.lowGraphics) {
+          ctx.fillStyle = 'rgba(225, 29, 72, 0.15)';
+          ctx.beginPath();
+          ctx.arc(x, y, 18, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
-      // Main enemy body
-      ctx.fillStyle = '#DC2626';
-      ctx.beginPath();
-      ctx.arc(x, y, 16, 0, Math.PI * 2);
-      ctx.fill();
+        // Main enemy body
+        ctx.fillStyle = '#DC2626';
+        ctx.beginPath();
+        ctx.arc(x, y, 12, 0, Math.PI * 2);
+        ctx.fill();
 
-      // Enemy border
-      ctx.strokeStyle = '#991B1B';
-      ctx.lineWidth = 3;
-      ctx.stroke();
+        // Enemy border
+        ctx.strokeStyle = '#991B1B';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
 
-      // Inner core
-      ctx.fillStyle = '#EF4444';
-      ctx.beginPath();
-      ctx.arc(x, y, 10, 0, Math.PI * 2);
-      ctx.fill();
+        // Inner core
+        ctx.fillStyle = '#EF4444';
+        ctx.beginPath();
+        ctx.arc(x, y, 7.5, 0, Math.PI * 2);
+        ctx.fill();
 
-      // Bright center
-      ctx.fillStyle = '#FCA5A5';
-      ctx.beginPath();
-      ctx.arc(x - 3, y - 3, 4, 0, Math.PI * 2);
-      ctx.fill();
+        // Bright center
+        ctx.fillStyle = '#FCA5A5';
+        ctx.beginPath();
+        ctx.arc(x - 2, y - 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        drawDirectionNotch(x, y, 12, enemy.dirX ?? 0, enemy.dirY ?? 0, {
+          fill: '#F87171',
+          stroke: '#7F1D1D',
+          tipOffset: 8,
+          halfWidth: 4,
+          lineWidth: 1.4,
+        });
+      }
     }
   });
+}
+
+function drawFireTail(x, y, dirX, dirY, radius, timestamp) {
+  const magnitude = Math.hypot(dirX, dirY);
+  if (magnitude < 0.01) return;
+  
+  // Normalize direction
+  const nx = dirX / magnitude;
+  const ny = dirY / magnitude;
+  
+  // Fire tail parameters
+  const tailLength = radius * 2.5;
+  const tailWidth = radius * 0.8;
+  
+  // Animated flicker effect
+  const flicker1 = Math.sin(timestamp * 0.01) * 0.2 + 0.8;
+  const flicker2 = Math.sin(timestamp * 0.015 + 1) * 0.15 + 0.85;
+  
+  // Start position (more inside the ship)
+  const startX = x - nx * radius * 0.8;
+  const startY = y - ny * radius * 0.8;
+  
+  // End position (tail end)
+  const endX = startX - nx * tailLength * flicker1;
+  const endY = startY - ny * tailLength * flicker1;
+  
+  // Perpendicular vector for width
+  const perpX = -ny;
+  const perpY = nx;
+  
+  ctx.save();
+  
+  // Outer flame (red-orange)
+  const gradient1 = ctx.createLinearGradient(startX, startY, endX, endY);
+  gradient1.addColorStop(0, `rgba(255, 69, 0, ${0.8 * flicker1})`); // Red-orange
+  gradient1.addColorStop(0.5, `rgba(255, 140, 0, ${0.5 * flicker2})`); // Dark orange
+  gradient1.addColorStop(1, 'rgba(255, 69, 0, 0)'); // Fade to transparent
+  
+  ctx.fillStyle = gradient1;
+  ctx.beginPath();
+  ctx.moveTo(startX + perpX * tailWidth * 0.3, startY + perpY * tailWidth * 0.3);
+  ctx.lineTo(startX - perpX * tailWidth * 0.3, startY - perpY * tailWidth * 0.3);
+  ctx.lineTo(endX, endY);
+  ctx.closePath();
+  ctx.fill();
+  
+  // Middle flame (orange-yellow)
+  const gradient2 = ctx.createLinearGradient(startX, startY, endX, endY);
+  gradient2.addColorStop(0, `rgba(255, 165, 0, ${0.9 * flicker2})`); // Orange
+  gradient2.addColorStop(0.4, `rgba(255, 215, 0, ${0.6 * flicker1})`); // Gold
+  gradient2.addColorStop(1, 'rgba(255, 165, 0, 0)'); // Fade to transparent
+  
+  const midLength = tailLength * 0.7 * flicker2;
+  const midEndX = startX - nx * midLength;
+  const midEndY = startY - ny * midLength;
+  
+  ctx.fillStyle = gradient2;
+  ctx.beginPath();
+  ctx.moveTo(startX + perpX * tailWidth * 0.2, startY + perpY * tailWidth * 0.2);
+  ctx.lineTo(startX - perpX * tailWidth * 0.2, startY - perpY * tailWidth * 0.2);
+  ctx.lineTo(midEndX, midEndY);
+  ctx.closePath();
+  ctx.fill();
+  
+  // Inner core (bright yellow-white)
+  const gradient3 = ctx.createLinearGradient(startX, startY, endX, endY);
+  gradient3.addColorStop(0, `rgba(255, 255, 200, ${0.95 * flicker1})`); // Bright yellow-white
+  gradient3.addColorStop(0.3, `rgba(255, 255, 100, ${0.7 * flicker2})`); // Yellow
+  gradient3.addColorStop(1, 'rgba(255, 255, 0, 0)'); // Fade to transparent
+  
+  const coreLength = tailLength * 0.4 * flicker1;
+  const coreEndX = startX - nx * coreLength;
+  const coreEndY = startY - ny * coreLength;
+  
+  ctx.fillStyle = gradient3;
+  ctx.beginPath();
+  ctx.moveTo(startX + perpX * tailWidth * 0.1, startY + perpY * tailWidth * 0.1);
+  ctx.lineTo(startX - perpX * tailWidth * 0.1, startY - perpY * tailWidth * 0.1);
+  ctx.lineTo(coreEndX, coreEndY);
+  ctx.closePath();
+  ctx.fill();
+  
+  ctx.restore();
 }
 
 function drawPlayers(players) {
@@ -1008,63 +1819,213 @@ function drawPlayers(players) {
     const x = player.x * scaleX;
     const y = player.y * scaleY;
     const isSelf = player.id === state.playerId;
-    const radius = isSelf ? 18 : 16;
+    const radius = isSelf ? 13 : 12;
 
     if (!player.alive) {
-      // Dead player
-      ctx.fillStyle = 'rgba(31, 41, 55, 0.6)';
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.strokeStyle = 'rgba(75, 85, 99, 0.8)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      // Dead player - draw faded spaceship
+      const spaceshipImg = spaceshipImages[player.spaceship];
+      if (spaceshipImg && spaceshipImg.complete) {
+        const size = radius * 3;
+        ctx.save();
+        ctx.globalAlpha = 0.3;
+        ctx.filter = 'grayscale(100%)';
+        ctx.translate(x, y);
+        ctx.drawImage(spaceshipImg, -size / 2, -size / 2, size, size);
+        ctx.restore();
+      } else {
+        // Fallback circle
+        ctx.fillStyle = 'rgba(31, 41, 55, 0.6)';
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
     } else {
+      // Draw fire tail if moving
+      let isMoving = false;
+      let fireDirX = 0;
+      let fireDirY = 0;
+      
+      if (isSelf) {
+        // For current player, use actual input state
+        isMoving = Math.hypot(state.combinedDir.x, state.combinedDir.y) > 0.01;
+        fireDirX = state.combinedDir.x;
+        fireDirY = state.combinedDir.y;
+      } else {
+        // For other players, use their direction from server
+        isMoving = Math.hypot(player.dirX || 0, player.dirY || 0) > 0.01;
+        fireDirX = player.dirX || 0;
+        fireDirY = player.dirY || 0;
+      }
+      
+      if (isMoving && !state.lowGraphics) {
+        drawFireTail(x, y, fireDirX, fireDirY, radius, Date.now());
+      }
+      // Respawn effect - blinking and glowing
+      const respawnEffect = state.respawnEffects.get(player.id);
+      let showPlayer = true; // For blink effect
+      let glowIntensity = 0;
+      
+      if (respawnEffect) {
+        const elapsed = Date.now() - respawnEffect.startTime;
+        if (elapsed >= respawnEffect.duration) {
+          state.respawnEffects.delete(player.id);
+        } else {
+          const progress = elapsed / respawnEffect.duration;
+          // Blink effect - faster at start, slower at end
+          const blinkFrequency = 12 - (progress * 10); // 12Hz to 2Hz
+          showPlayer = Math.sin(elapsed * blinkFrequency * Math.PI / 100) > 0;
+          
+          // Glow intensity - strong at start, fades out
+          glowIntensity = 1 - progress;
+          
+          // Glowing aura around player
+          if (!state.lowGraphics && glowIntensity > 0) {
+            const gradient = ctx.createRadialGradient(x, y, radius, x, y, radius + 20);
+            gradient.addColorStop(0, `rgba(255, 255, 255, ${glowIntensity * 0.6})`);
+            gradient.addColorStop(0.5, `rgba(34, 211, 238, ${glowIntensity * 0.4})`);
+            gradient.addColorStop(1, 'rgba(34, 211, 238, 0)');
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(x, y, radius + 20, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+      
       // Dashing effect
       if (!state.lowGraphics && player.dashing) {
         ctx.fillStyle = isSelf ? 'rgba(22, 163, 74, 0.2)' : 'rgba(56, 189, 248, 0.2)';
         ctx.beginPath();
-        ctx.arc(x, y, radius + 12, 0, Math.PI * 2);
+        ctx.arc(x, y, radius + 9, 0, Math.PI * 2);
         ctx.fill();
 
         ctx.strokeStyle = '#F59E0B';
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(x, y, radius + 6, 0, Math.PI * 2);
+        ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
         ctx.stroke();
       }
 
-      // Main player body
-      ctx.fillStyle = isSelf ? '#16A34A' : '#0EA5E9';
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Player border
-      ctx.strokeStyle = isSelf ? '#15803D' : '#0369A1';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-
-      // Inner highlight
-      ctx.fillStyle = isSelf ? '#22C55E' : '#38BDF8';
-      ctx.beginPath();
-      ctx.arc(x, y, radius - 4, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Bright spot
-      ctx.fillStyle = isSelf ? '#86EFAC' : '#BAE6FD';
-      ctx.beginPath();
-      ctx.arc(x - 4, y - 4, 5, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Self indicator
-      if (isSelf) {
-        ctx.strokeStyle = '#F59E0B';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
-        ctx.stroke();
+      // Only draw player if visible in blink cycle
+      if (!showPlayer) {
+        // Skip drawing the player body during blink-off phase
+        // But still show a faint outline
+        if (respawnEffect) {
+          ctx.strokeStyle = isSelf ? 'rgba(22, 163, 74, 0.3)' : 'rgba(14, 165, 233, 0.3)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(x, y, radius * 2, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      } else {
+        // Draw spaceship image
+  const spaceshipImg = player.spaceship ? spaceshipImages[player.spaceship] : null;
+        if (spaceshipImg && spaceshipImg.complete) {
+          const size = radius * 3; // Image size
+          const angle = player.displayAngle !== undefined ? player.displayAngle : 
+                       (player.dirX || player.dirY ? Math.atan2(player.dirY || 0, player.dirX || 0) : 0);
+          
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(angle + Math.PI / 2); // Rotate to face direction (add 90deg because image faces up)
+          
+          // Draw shadow if not low graphics
+          if (!state.lowGraphics) {
+            ctx.globalAlpha = 0.3;
+            ctx.fillStyle = '#000';
+            ctx.fillRect(-size / 2 + 2, -size / 2 + 2, size, size);
+            ctx.globalAlpha = 1;
+          }
+          
+          ctx.drawImage(spaceshipImg, -size / 2, -size / 2, size, size);
+          ctx.restore();
+          
+          // Self indicator ring
+          if (isSelf) {
+            ctx.strokeStyle = '#F59E0B';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 2 + 4, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        } else {
+          // Fallback to colored circle if image not loaded or no spaceship
+          ctx.fillStyle = isSelf ? '#16A34A' : '#0EA5E9';
+          ctx.beginPath();
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+          ctx.fill();
+          
+          // Border
+          ctx.strokeStyle = isSelf ? '#15803D' : '#0369A1';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          
+          // Self indicator
+          if (isSelf) {
+            ctx.strokeStyle = '#F59E0B';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(x, y, radius + 3, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+      
+        // Powerup indicator - purple aura
+        if (player.hasPowerup) {
+          if (!state.lowGraphics) {
+            ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 2 + 10, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          
+          ctx.strokeStyle = '#A855F7';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(x, y, radius * 2 + 6, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        
+        // Rapid-fire indicator - orange/red spinning aura
+        if (player.hasRapidfire) {
+          if (!state.lowGraphics) {
+            ctx.fillStyle = 'rgba(251, 146, 60, 0.4)';
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 2 + 12, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          
+          // Spinning arrows around player
+          ctx.save();
+          ctx.translate(x, y);
+          const spinAngle = (Date.now() / 300) % (Math.PI * 2); // Fast spin
+          ctx.rotate(spinAngle);
+          
+          for (let i = 0; i < 4; i++) {
+            ctx.save();
+            ctx.rotate((i * Math.PI) / 2);
+            
+            // Draw small arrow
+            ctx.fillStyle = '#FB923C';
+            ctx.beginPath();
+            ctx.moveTo(0, -(radius * 2 + 8));
+            ctx.lineTo(-4, -(radius * 2 + 4));
+            ctx.lineTo(0, -(radius * 2 + 10));
+            ctx.lineTo(4, -(radius * 2 + 4));
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.restore();
+          }
+          
+          ctx.restore();
+          
+          ctx.strokeStyle = '#F97316';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(x, y, radius * 2 + 6, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       }
     }
 
@@ -1083,6 +2044,109 @@ function drawPlayers(players) {
     ctx.textBaseline = 'middle';
     ctx.fillText(player.name, x, y - 25);
   });
+}
+
+function drawPowerupEffects(timestamp) {
+  const scaleX = canvasScaleX();
+  const scaleY = canvasScaleY();
+  
+  // Clean up old effects and draw active ones
+  state.powerupEffects = state.powerupEffects.filter(effect => {
+    const elapsed = timestamp - effect.startTime;
+    if (elapsed >= effect.duration) {
+      return false; // Remove completed effect
+    }
+    
+    const progress = elapsed / effect.duration;
+    const x = effect.x * scaleX;
+    const y = effect.y * scaleY;
+    
+    // Expanding ring effect
+    const maxRadius = 200; // Match POWERUP_KILL_RADIUS from server
+    const radius = maxRadius * progress;
+    const opacity = 1 - progress;
+    
+    // Outer explosion ring
+    ctx.strokeStyle = `rgba(168, 85, 247, ${opacity * 0.8})`;
+    ctx.lineWidth = 8 * (1 - progress * 0.7);
+    ctx.beginPath();
+    ctx.arc(x, y, radius * scaleX, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    // Inner explosion ring
+    ctx.strokeStyle = `rgba(192, 132, 252, ${opacity * 0.6})`;
+    ctx.lineWidth = 6 * (1 - progress * 0.7);
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 0.7 * scaleX, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    // Flash at center
+    if (progress < 0.3) {
+      ctx.fillStyle = `rgba(233, 213, 255, ${(1 - progress / 0.3) * 0.7})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 30 * (1 - progress / 0.3), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    // Particles
+    if (!state.lowGraphics) {
+      for (let i = 0; i < 12; i++) {
+        const angle = (i * Math.PI * 2) / 12;
+        const particleRadius = radius * 0.9;
+        const px = x + Math.cos(angle) * particleRadius * scaleX;
+        const py = y + Math.sin(angle) * particleRadius * scaleY;
+        
+        ctx.fillStyle = `rgba(168, 85, 247, ${opacity * 0.6})`;
+        ctx.beginPath();
+        ctx.arc(px, py, 5 * (1 - progress), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    
+    return true; // Keep effect
+  });
+}
+
+function spawnDeathEffect(worldX, worldY, worldRadius) {
+  const layer = elements.effectLayer;
+  if (!layer) return;
+
+  const layerWidth = layer.clientWidth || elements.canvas.clientWidth || elements.canvas.width;
+  const layerHeight = layer.clientHeight || elements.canvas.clientHeight || elements.canvas.height;
+
+  if (!layerWidth || !layerHeight) return;
+
+  const scaleX = layerWidth / WORLD_WIDTH;
+  const scaleY = layerHeight / WORLD_HEIGHT;
+  const scale = Math.min(scaleX, scaleY);
+
+  const effectSize = Math.max(100, Math.round((worldRadius * 8.5) * scale));
+  const effect = document.createElement('img');
+  effect.src = assets.blast;
+  effect.alt = '';
+  effect.className = 'death-effect';
+  effect.style.left = `${(worldX / WORLD_WIDTH) * layerWidth}px`;
+  effect.style.top = `${(worldY / WORLD_HEIGHT) * layerHeight}px`;
+  effect.style.width = `${effectSize}px`;
+  effect.style.height = `${effectSize}px`;
+
+  layer.appendChild(effect);
+
+  setTimeout(() => {
+    effect.classList.add('fade-out');
+  }, Math.max(0, BLAST_EFFECT_DURATION - 200));
+
+  setTimeout(() => {
+    if (effect.parentNode === layer) {
+      layer.removeChild(effect);
+    }
+  }, BLAST_EFFECT_DURATION);
+}
+
+function clearEffectLayer() {
+  if (elements.effectLayer) {
+    elements.effectLayer.innerHTML = '';
+  }
 }
 
 function drawLeavingPlayers(timestamp) {
@@ -1162,12 +2226,12 @@ function drawLeavingPlayers(timestamp) {
 
 function canvasScaleX() {
   const displayWidth = parseFloat(elements.canvas.style.width) || elements.canvas.width;
-  return displayWidth / 1600;
+  return displayWidth / WORLD_WIDTH;
 }
 
 function canvasScaleY() {
   const displayHeight = parseFloat(elements.canvas.style.height) || elements.canvas.height;
-  return displayHeight / 900;
+  return displayHeight / WORLD_HEIGHT;
 }
 
 window.addEventListener('resize', () => resizeCanvas(), { passive: true });
@@ -1208,8 +2272,17 @@ function updateFromDeepLink() {
   const idx = pathParts.findIndex((part) => part.toLowerCase() === 'play');
   if (idx >= 0 && pathParts[idx + 1]) {
     const roomId = pathParts[idx + 1];
+    cachedCreateSelection = state.selectedSpaceship;
+    state.takenSpaceships.clear();
+    state.lastFetchedRoomId = null;
+    state.lastRoomFetchTimestamp = 0;
+    cachedJoinSelection = null;
+    state.selectedSpaceship = null;
+    elements.joinSpaceship.value = '';
     showScreen('join');
+    renderSpaceshipGrid(elements.joinSpaceshipGrid, elements.joinSpaceship);
     elements.joinLink.value = buildJoinUrl(roomId, '');
+    scheduleRoomAvailabilityFetch(elements.joinLink.value);
     const nameParam = new URLSearchParams(window.location.search).get('name');
     if (nameParam) {
       elements.joinName.value = nameParam.slice(0, 16);
@@ -1228,6 +2301,7 @@ function tryRestoreSession() {
   state.hostKey = session.hostKey;
   state.passcode = session.passcode;
   state.joinUrl = session.joinUrl;
+  state.selectedSpaceship = session.spaceship;
   
   // Show leave button
   elements.leaveGame.style.display = 'block';
@@ -1243,7 +2317,8 @@ function tryRestoreSession() {
     roomId: session.roomId,
     name: displayName,
     hostKey: session.hostKey,
-    passcode: session.passcode
+    passcode: session.passcode,
+    spaceship: session.spaceship
   });
   
   return true;

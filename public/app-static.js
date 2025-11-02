@@ -583,6 +583,10 @@ function handleStateTransition(serialized) {
 
 function updateFromSerializedState(serialized) {
   if (!serialized) return;
+  const previousPlayersArray = state.gameState?.players || [];
+  const previousPlayers = new Map(previousPlayersArray.map((player) => [player.id, player]));
+  const previousEnemiesArray = state.gameState?.enemies || [];
+  const previousEnemies = new Map(previousEnemiesArray.map((enemy) => [enemy.id, enemy]));
   if (serialized.config) {
     state.config = serialized.config;
   }
@@ -590,6 +594,65 @@ function updateFromSerializedState(serialized) {
     state.lastLobbyState = serialized;
   }
   if (serialized.state === 'running') {
+    const players = serialized.players || [];
+    players.forEach((player) => {
+      const previous = previousPlayers.get(player.id);
+      if (!player.alive) {
+        player.dirX = 0;
+        player.dirY = 0;
+        return;
+      }
+      const dx = previous ? player.x - previous.x : 0;
+      const dy = previous ? player.y - previous.y : 0;
+      const magnitude = Math.hypot(dx, dy);
+      if (magnitude > 0.01) {
+        player.dirX = dx / magnitude;
+        player.dirY = dy / magnitude;
+      } else {
+        player.dirX = 0;
+        player.dirY = 0;
+      }
+    });
+
+    const enemies = serialized.enemies || [];
+    enemies.forEach((enemy) => {
+      const previous = previousEnemies.get(enemy.id);
+      if (enemy.active === false) {
+        enemy.dirX = 0;
+        enemy.dirY = 0;
+        return;
+      }
+      const dx = previous ? enemy.x - previous.x : 0;
+      const dy = previous ? enemy.y - previous.y : 0;
+      const magnitude = Math.hypot(dx, dy);
+      if (magnitude > 0.5) {
+        // Smooth the direction change
+        const newDirX = dx / magnitude;
+        const newDirY = dy / magnitude;
+        if (previous && previous.dirX !== undefined) {
+          // Blend with previous direction for smoothness
+          enemy.dirX = previous.dirX * 0.7 + newDirX * 0.3;
+          enemy.dirY = previous.dirY * 0.7 + newDirY * 0.3;
+          // Re-normalize
+          const mag = Math.hypot(enemy.dirX, enemy.dirY);
+          if (mag > 0) {
+            enemy.dirX /= mag;
+            enemy.dirY /= mag;
+          }
+        } else {
+          enemy.dirX = newDirX;
+          enemy.dirY = newDirY;
+        }
+      } else if (previous && previous.dirX !== undefined) {
+        // Keep previous direction if barely moving
+        enemy.dirX = previous.dirX;
+        enemy.dirY = previous.dirY;
+      } else {
+        enemy.dirX = 0;
+        enemy.dirY = 0;
+      }
+    });
+
     state.gameState = serialized;
   }
   if (serialized.state === 'results') {
@@ -813,6 +876,49 @@ function drawCoins(coins) {
   });
 }
 
+// Draw a small triangular pointer indicating an entity's movement direction.
+function drawDirectionNotch(x, y, radius, dirX, dirY, options = {}) {
+  const magnitude = Math.hypot(dirX, dirY);
+  if (magnitude < 0.01) return;
+
+  const {
+    fill = '#FFFFFF',
+    stroke = '#1E293B',
+    tipOffset = 8,
+    baseOffset = 0,
+    halfWidth = 4,
+    lineWidth = 1.25,
+  } = options;
+
+  const nx = dirX / magnitude;
+  const ny = dirY / magnitude;
+  const baseDistance = radius + baseOffset;
+  const tipDistance = radius + tipOffset;
+  const baseX = x + nx * baseDistance;
+  const baseY = y + ny * baseDistance;
+  const tipX = x + nx * tipDistance;
+  const tipY = y + ny * tipDistance;
+  const perpX = -ny;
+  const perpY = nx;
+  const leftX = baseX + perpX * halfWidth;
+  const leftY = baseY + perpY * halfWidth;
+  const rightX = baseX - perpX * halfWidth;
+  const rightY = baseY - perpY * halfWidth;
+
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(leftX, leftY);
+  ctx.lineTo(rightX, rightY);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+  }
+}
+
 function drawEnemies(enemies) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
@@ -828,6 +934,15 @@ function drawEnemies(enemies) {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
       ctx.lineWidth = 2;
       ctx.stroke();
+    }
+    if (enemy.active !== false) {
+      drawDirectionNotch(x, y, radius, enemy.dirX ?? 0, enemy.dirY ?? 0, {
+        fill: '#F87171',
+        stroke: '#7F1D1D',
+        tipOffset: 8,
+        halfWidth: 4,
+        lineWidth: 1.4,
+      });
     }
   });
 }
@@ -854,6 +969,13 @@ function drawPlayers(players) {
       ctx.lineWidth = 4;
       ctx.stroke();
     }
+    drawDirectionNotch(x, y, isSelf ? 18 : 16, player.dirX ?? 0, player.dirY ?? 0, {
+      fill: isSelf ? '#FDE68A' : '#E0F2FE',
+      stroke: isSelf ? '#D97706' : '#0284C7',
+      tipOffset: 10,
+      halfWidth: 4,
+      lineWidth: 1.2,
+    });
     ctx.fillStyle = '#FFFFFF';
     ctx.font = '14px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';

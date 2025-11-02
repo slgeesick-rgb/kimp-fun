@@ -11,7 +11,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const DEFAULT_CONFIG = {
   targetScore: 50,
-  maxPlayers: 24,
+  maxPlayers: 15,
   roomTimeoutMinutes: 10,
   passcodeEnabled: true,
   deathPenaltyEnabled: true,
@@ -19,19 +19,31 @@ const DEFAULT_CONFIG = {
 
 const TICK_RATE = 30;
 const FRAME_MS = 1000 / TICK_RATE;
-const PLAYER_RADIUS = 24;
-const COIN_RADIUS = 16;
-const ENEMY_RADIUS = 28;
+const PLAYER_RADIUS = 18;
+const COIN_RADIUS = 12;
+const ENEMY_RADIUS = 22;
+const POWERUP_RADIUS = 16;
 const MAP_WIDTH = 1600;
 const MAP_HEIGHT = 900;
 const MAX_COINS = 12;
 const MAX_ENEMIES = 6;
+const MAX_POWERUPS_PER_GAME = 2; // Only 2 powerups per game session
 const RESPAWN_MS = 2000;
 const DASH_DURATION_MS = 220;
 const DASH_COOLDOWN_MS = 900;
 const PLAYER_SPEED = 380;
 const DASH_SPEED = 650;
 const ENEMY_SPEED = 160;
+const POWERUP_SPAWN_INTERVAL = 20000; // 20 seconds - make them rare
+const POWERUP_DURATION_MS = 5000; // 5 seconds - powerup expires after collection
+const POWERUP_KILL_RADIUS = 200; // Radius to kill nearby players
+const RAPIDFIRE_RADIUS = 16;
+const RAPIDFIRE_SPAWN_INTERVAL = 15000; // 15 seconds - spawn more frequently than powerups
+const RAPIDFIRE_DURATION_MS = 3000; // 3 seconds of rapid-fire
+const RAPIDFIRE_INTERVAL_MS = 150; // Fire every 150ms (6.67 shots per second)
+const BULLET_RADIUS = 4;
+const BULLET_SPEED = 500; // Pixels per second
+const BULLET_LIFETIME_MS = 2000; // Bullets last 2 seconds
 const INPUT_RATE_LIMIT_MS = 16;
 const LOBBY_HEARTBEAT_MS = 1000;
 const ROOM_SWEEP_MS = 60000;
@@ -45,6 +57,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'POST' && req.url === '/api/create-room') {
       await handleCreateRoom(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && req.url.startsWith('/api/room/')) {
+      await handleRoomInfo(req, res);
       return;
     }
 
@@ -150,6 +167,54 @@ function getMimeType(filePath) {
   }
 }
 
+async function handleRoomInfo(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const roomIdRaw = parts[parts.length - 1] || '';
+  const roomId = roomIdRaw.toLowerCase();
+
+  if (!roomId || !/^[a-f0-9]{8}$/.test(roomId)) {
+    res.statusCode = 400;
+    res.setHeader('Content-Type', 'application/json; charset=UTF-8');
+    res.end(JSON.stringify({ error: 'Invalid room id' }));
+    return;
+  }
+
+  const room = rooms.get(roomId);
+  if (!room) {
+    res.statusCode = 404;
+    res.setHeader('Content-Type', 'application/json; charset=UTF-8');
+    res.end(JSON.stringify({ error: 'Room not found' }));
+    return;
+  }
+
+  const players = Array.from(room.players.values())
+    .filter((player) => !player.disconnected)
+    .map((player) => ({
+      id: player.id,
+      name: player.name,
+      spaceship: player.spaceship || null,
+    }));
+
+  const takenSpaceships = players
+    .map((player) => player.spaceship)
+    .filter((ship) => Number.isInteger(ship));
+
+  res.setHeader('Content-Type', 'application/json; charset=UTF-8');
+  res.end(JSON.stringify({
+    roomId: room.id,
+    state: room.state,
+    config: {
+      maxPlayers: room.config.maxPlayers,
+      targetScore: room.config.targetScore,
+      deathPenaltyEnabled: room.config.deathPenaltyEnabled,
+    },
+    passcodeRequired: Boolean(room.passcode),
+    players,
+    takenSpaceships,
+  }));
+}
+
 async function handleCreateRoom(req, res) {
   const body = await readBody(req);
   const {
@@ -173,7 +238,7 @@ async function handleCreateRoom(req, res) {
   if (Number.isInteger(targetScore) && targetScore >= 10 && targetScore <= 500) {
     config.targetScore = targetScore;
   }
-  if (Number.isInteger(maxPlayers) && maxPlayers >= 2 && maxPlayers <= 48) {
+  if (Number.isInteger(maxPlayers) && maxPlayers >= 2 && maxPlayers <= 15) {
     config.maxPlayers = maxPlayers;
   }
   if (typeof passcodeEnabled === 'boolean') {
@@ -198,6 +263,9 @@ async function handleCreateRoom(req, res) {
     hostKey,
     hostName,
     passcode: roomPasscode,
+    lastPowerupSpawn: 0,
+    powerupsSpawnedThisGame: 0,
+    lastRapidfireSpawn: 0,
     config,
     createdAt: Date.now(),
     lastActive: Date.now(),
@@ -207,6 +275,9 @@ async function handleCreateRoom(req, res) {
     players: new Map(),
     coins: new Map(),
     enemies: new Map(),
+    powerups: new Map(),
+    rapidfires: new Map(),
+    bullets: new Map(),
     reservedNames: new Set([hostName.toLowerCase()]),
     lastLobbyBroadcast: Date.now(),
   };
@@ -292,7 +363,7 @@ function handleSocketMessage(socket, data) {
 }
 
 function handleJoin(socket, payload) {
-  const { roomId, name, passcode, hostKey } = payload || {};
+  const { roomId, name, passcode, hostKey, spaceship } = payload || {};
   const room = rooms.get(roomId);
   if (!room) {
     send(socket, { type: 'error', message: 'Room not found' });
@@ -311,6 +382,12 @@ function handleJoin(socket, payload) {
     return;
   }
 
+  // Validate spaceship selection
+  if (!spaceship || spaceship < 1 || spaceship > 15) {
+    send(socket, { type: 'error', message: 'Invalid spaceship selection' });
+    return;
+  }
+
   // Check if this is a reconnecting player
   const loweredName = requestedName.toLowerCase();
   const existingPlayer = Array.from(room.players.values()).find(
@@ -318,7 +395,8 @@ function handleJoin(socket, payload) {
   );
   
   if (existingPlayer) {
-    // Reconnect existing player
+    // Reconnect existing player - they keep their original spaceship
+    // No need to validate spaceship for reconnecting players
     existingPlayer.connection = socket;
     existingPlayer.disconnected = false;
     socket.playerId = existingPlayer.id;
@@ -356,6 +434,16 @@ function handleJoin(socket, payload) {
     return;
   }
 
+  // Check if spaceship is already taken by another active player
+  const spaceshipTaken = Array.from(room.players.values()).some(
+    p => p.spaceship === spaceship && !p.disconnected
+  );
+  
+  if (spaceshipTaken) {
+    send(socket, { type: 'error', message: 'Spaceship already taken' });
+    return;
+  }
+
   let finalName = requestedName;
   let isHost = false;
 
@@ -385,6 +473,12 @@ function handleJoin(socket, payload) {
     inputSeq: 0,
     inputDir: { x: 0, y: 0 },
     wantsAction: false,
+    wantsPowerup: false,
+    hasPowerup: false,
+    powerupExpiresAt: 0,
+    hasRapidfire: false,
+    rapidfireExpiresAt: 0,
+    lastRapidfireShot: 0,
     x: Math.random() * (MAP_WIDTH - 200) + 100,
     y: Math.random() * (MAP_HEIGHT - 200) + 100,
     angle: 0,
@@ -394,6 +488,7 @@ function handleJoin(socket, payload) {
     dashingUntil: 0,
     dashCooldownUntil: 0,
     joinedAt: Date.now(),
+    spaceship: spaceship,
   };
 
   socket.playerId = playerId;
@@ -452,7 +547,7 @@ function handleInput(socket, payload) {
   if (now - player.lastInputAt < INPUT_RATE_LIMIT_MS) return;
   player.lastInputAt = now;
 
-  const { seq, dir, action } = payload;
+  const { seq, dir, action, powerup } = payload;
   if (typeof seq === 'number') {
     player.inputSeq = seq;
   }
@@ -465,6 +560,7 @@ function handleInput(socket, payload) {
     }
   }
   player.wantsAction = Boolean(action);
+  player.wantsPowerup = Boolean(powerup);
   room.lastActive = now;
 }
 
@@ -504,6 +600,12 @@ function startMatch(room, isRematch = false) {
   room.winnerId = null;
   room.coins.clear();
   room.enemies.clear();
+  room.powerups.clear();
+  room.rapidfires.clear();
+  room.bullets.clear();
+  room.lastPowerupSpawn = Date.now();
+  room.powerupsSpawnedThisGame = 0; // Reset powerup counter for new game
+  room.lastRapidfireSpawn = Date.now();
   room.lastActive = Date.now();
 
   const seeds = crypto.randomBytes(8).readUInt32BE(0);
@@ -513,6 +615,12 @@ function startMatch(room, isRematch = false) {
     player.score = 0;
     player.inputDir = { x: 0, y: 0 };
     player.wantsAction = false;
+    player.wantsPowerup = false;
+    player.hasPowerup = false;
+    player.powerupExpiresAt = 0;
+    player.hasRapidfire = false;
+    player.rapidfireExpiresAt = 0;
+    player.lastRapidfireShot = 0;
     player.alive = true;
     player.respawnAt = 0;
     player.dashingUntil = 0;
@@ -553,6 +661,76 @@ function ensureEnemies(room) {
       respawnAt: 0,
     });
   }
+}
+
+function ensurePowerups(room, now) {
+  // Remove expired powerups from the map
+  const toDelete = [];
+  for (const powerup of room.powerups.values()) {
+    if (now >= powerup.expiresAt) {
+      toDelete.push(powerup.id);
+    }
+  }
+  for (const id of toDelete) {
+    room.powerups.delete(id);
+  }
+  
+  // Check if we've already spawned the maximum powerups for this game session
+  if (room.powerupsSpawnedThisGame >= MAX_POWERUPS_PER_GAME) {
+    return;
+  }
+  
+  // Only spawn a new powerup if enough time has passed
+  if (now - room.lastPowerupSpawn < POWERUP_SPAWN_INTERVAL) {
+    return;
+  }
+  
+  // Don't spawn if there's already one on the map (only one at a time)
+  if (room.powerups.size > 0) {
+    return;
+  }
+  
+  const id = crypto.randomBytes(6).toString('hex');
+  room.powerups.set(id, {
+    id,
+    x: Math.random() * (MAP_WIDTH - 200) + 100,
+    y: Math.random() * (MAP_HEIGHT - 200) + 100,
+    expiresAt: now + POWERUP_DURATION_MS, // Powerup disappears after 5 seconds
+  });
+  room.lastPowerupSpawn = now;
+  room.powerupsSpawnedThisGame += 1; // Increment the counter
+}
+
+function ensureRapidfires(room, now) {
+  // Remove expired rapidfire collectibles from the map
+  const toDelete = [];
+  for (const rapidfire of room.rapidfires.values()) {
+    if (now >= rapidfire.expiresAt) {
+      toDelete.push(rapidfire.id);
+    }
+  }
+  for (const id of toDelete) {
+    room.rapidfires.delete(id);
+  }
+  
+  // Only spawn a new rapidfire if enough time has passed
+  if (now - room.lastRapidfireSpawn < RAPIDFIRE_SPAWN_INTERVAL) {
+    return;
+  }
+  
+  // Don't spawn if there's already one on the map (only one at a time)
+  if (room.rapidfires.size > 0) {
+    return;
+  }
+  
+  const id = crypto.randomBytes(6).toString('hex');
+  room.rapidfires.set(id, {
+    id,
+    x: Math.random() * (MAP_WIDTH - 200) + 100,
+    y: Math.random() * (MAP_HEIGHT - 200) + 100,
+    expiresAt: now + 10000, // Rapidfire collectible disappears after 10 seconds
+  });
+  room.lastRapidfireSpawn = now;
 }
 
 function randomRange(min, max) {
@@ -608,8 +786,23 @@ function updateMatch(room, now) {
 
   handleCoinCollisions(room, now);
   if (room.state !== 'running') return;
+  handlePowerupCollisions(room, now);
+  if (room.state !== 'running') return;
+  handlePowerupExpiration(room, now);
+  handlePowerupUsage(room, now);
+  if (room.state !== 'running') return;
+  handleRapidfireCollisions(room, now);
+  if (room.state !== 'running') return;
+  handleRapidfireExpiration(room, now);
+  handleRapidfireAutoShoot(room, now);
+  if (room.state !== 'running') return;
+  updateBullets(room, now, delta);
+  handleBulletCollisions(room, now);
+  if (room.state !== 'running') return;
   handleEnemyLogic(room, now, delta);
   if (room.state !== 'running') return;
+  ensurePowerups(room, now);
+  ensureRapidfires(room, now);
   broadcast(room, {
     type: 'state',
     state: serializeGame(room),
@@ -637,6 +830,250 @@ function handleCoinCollisions(room, now) {
   }
   if (toDelete.length) {
     ensureCoins(room);
+  }
+}
+
+function handlePowerupCollisions(room, now) {
+  const toDelete = [];
+  for (const player of room.players.values()) {
+    if (player.disconnected || !player.alive || player.hasPowerup) continue;
+    
+    // Check if player wants to collect powerup (pressed spacebar)
+    const wantsPowerup = player.wantsPowerup;
+    
+    if (wantsPowerup) {
+      for (const powerup of room.powerups.values()) {
+        const dist = Math.hypot(player.x - powerup.x, player.y - powerup.y);
+        if (dist <= PLAYER_RADIUS + POWERUP_RADIUS) {
+          toDelete.push(powerup.id);
+          player.hasPowerup = true;
+          player.powerupExpiresAt = now + POWERUP_DURATION_MS; // Set expiration time
+          player.wantsPowerup = false; // Consume the input for collection
+          break; // Only one powerup per player at a time
+        }
+      }
+    }
+  }
+  for (const id of toDelete) {
+    room.powerups.delete(id);
+  }
+}
+
+function handlePowerupExpiration(room, now) {
+  // Check if any player's powerup has expired
+  for (const player of room.players.values()) {
+    if (player.hasPowerup && now >= player.powerupExpiresAt) {
+      player.hasPowerup = false;
+      player.powerupExpiresAt = 0;
+    }
+  }
+}
+
+function handlePowerupUsage(room, now) {
+  for (const player of room.players.values()) {
+    if (player.disconnected || !player.alive) continue;
+    
+    const wantsPowerup = player.wantsPowerup;
+    player.wantsPowerup = false;
+    
+    // Only use powerup if player has one AND the input wasn't already consumed by collection
+    if (wantsPowerup && player.hasPowerup) {
+      // Use powerup - kill nearby players
+      player.hasPowerup = false;
+      player.powerupExpiresAt = 0;
+      
+      for (const target of room.players.values()) {
+        if (target.id === player.id || target.disconnected || !target.alive) continue;
+        
+        const dist = Math.hypot(player.x - target.x, player.y - target.y);
+        if (dist <= POWERUP_KILL_RADIUS) {
+          // Kill the target player
+          if (room.config.deathPenaltyEnabled) {
+            target.score = Math.max(0, target.score - 1);
+          }
+          target.alive = false;
+          target.respawnAt = now + RESPAWN_MS;
+          
+          // Give points to the player who used the powerup
+          player.score += 3;
+          if (checkWin(room, player)) {
+            return;
+          }
+        }
+      }
+    }
+  }
+}
+
+function handleRapidfireCollisions(room, now) {
+  const toDelete = [];
+  for (const player of room.players.values()) {
+    if (player.disconnected || !player.alive || player.hasRapidfire) continue;
+    
+    for (const rapidfire of room.rapidfires.values()) {
+      const dist = Math.hypot(player.x - rapidfire.x, player.y - rapidfire.y);
+      if (dist <= PLAYER_RADIUS + RAPIDFIRE_RADIUS) {
+        toDelete.push(rapidfire.id);
+        player.hasRapidfire = true;
+        player.rapidfireExpiresAt = now + RAPIDFIRE_DURATION_MS;
+        player.lastRapidfireShot = now; // Start firing immediately
+        break; // Only one rapidfire per player at a time
+      }
+    }
+  }
+  for (const id of toDelete) {
+    room.rapidfires.delete(id);
+  }
+}
+
+function handleRapidfireExpiration(room, now) {
+  // Check if any player's rapidfire has expired
+  for (const player of room.players.values()) {
+    if (player.hasRapidfire && now >= player.rapidfireExpiresAt) {
+      player.hasRapidfire = false;
+      player.rapidfireExpiresAt = 0;
+      player.lastRapidfireShot = 0;
+    }
+  }
+}
+
+function handleRapidfireAutoShoot(room, now) {
+  // Auto-shoot for players with active rapidfire
+  for (const player of room.players.values()) {
+    if (player.disconnected || !player.alive || !player.hasRapidfire) continue;
+    
+    // Check if enough time has passed since the last shot
+    if (now - player.lastRapidfireShot >= RAPIDFIRE_INTERVAL_MS) {
+      player.lastRapidfireShot = now;
+      
+      // Spawn a bullet
+      // Determine direction - use input direction if moving, otherwise face right
+      let dirX = player.inputDir.x;
+      let dirY = player.inputDir.y;
+      const magnitude = Math.hypot(dirX, dirY);
+      
+      if (magnitude < 0.01) {
+        // If not moving, shoot in the direction the player is facing (right by default)
+        dirX = 1;
+        dirY = 0;
+      } else {
+        // Normalize direction
+        dirX /= magnitude;
+        dirY /= magnitude;
+      }
+      
+      const bulletId = crypto.randomBytes(6).toString('hex');
+      room.bullets.set(bulletId, {
+        id: bulletId,
+        ownerId: player.id,
+        x: player.x + dirX * PLAYER_RADIUS, // Spawn slightly ahead of player
+        y: player.y + dirY * PLAYER_RADIUS,
+        vx: dirX * BULLET_SPEED,
+        vy: dirY * BULLET_SPEED,
+        createdAt: now,
+        expiresAt: now + BULLET_LIFETIME_MS,
+      });
+    }
+  }
+}
+
+function updateBullets(room, now, delta) {
+  const toDelete = [];
+  
+  for (const bullet of room.bullets.values()) {
+    // Check if bullet expired
+    if (now >= bullet.expiresAt) {
+      toDelete.push(bullet.id);
+      continue;
+    }
+    
+    // Move bullet
+    bullet.x += bullet.vx * delta;
+    bullet.y += bullet.vy * delta;
+    
+    // Remove bullets that go out of bounds
+    if (bullet.x < 0 || bullet.x > MAP_WIDTH || bullet.y < 0 || bullet.y > MAP_HEIGHT) {
+      toDelete.push(bullet.id);
+    }
+  }
+  
+  for (const id of toDelete) {
+    room.bullets.delete(id);
+  }
+}
+
+function handleBulletCollisions(room, now) {
+  const bulletsToDelete = [];
+  
+  for (const bullet of room.bullets.values()) {
+    let hitSomething = false;
+    
+    // Check collision with players (not the owner)
+    for (const player of room.players.values()) {
+      if (player.id === bullet.ownerId || player.disconnected || !player.alive) continue;
+      
+      const dist = Math.hypot(player.x - bullet.x, player.y - bullet.y);
+      if (dist <= PLAYER_RADIUS + BULLET_RADIUS) {
+        // Hit player - kill them
+        if (room.config.deathPenaltyEnabled) {
+          player.score = Math.max(0, player.score - 1);
+        }
+        player.alive = false;
+        player.respawnAt = now + RESPAWN_MS;
+        
+        // Give score to shooter
+        const shooter = room.players.get(bullet.ownerId);
+        if (shooter) {
+          shooter.score += 2;
+          if (checkWin(room, shooter)) {
+            bulletsToDelete.push(bullet.id);
+            hitSomething = true;
+            break;
+          }
+        }
+        
+        hitSomething = true;
+        break;
+      }
+    }
+    
+    if (hitSomething) {
+      bulletsToDelete.push(bullet.id);
+      continue;
+    }
+    
+    // Check collision with enemies
+    for (const enemy of room.enemies.values()) {
+      if (enemy.respawnAt && now < enemy.respawnAt) continue;
+      
+      const dist = Math.hypot(enemy.x - bullet.x, enemy.y - bullet.y);
+      if (dist <= ENEMY_RADIUS + BULLET_RADIUS) {
+        // Hit enemy - respawn it
+        enemy.respawnAt = now + 3000;
+        
+        // Give score to shooter
+        const shooter = room.players.get(bullet.ownerId);
+        if (shooter) {
+          shooter.score += 1;
+          if (checkWin(room, shooter)) {
+            bulletsToDelete.push(bullet.id);
+            hitSomething = true;
+            break;
+          }
+        }
+        
+        hitSomething = true;
+        break;
+      }
+    }
+    
+    if (hitSomething) {
+      bulletsToDelete.push(bullet.id);
+    }
+  }
+  
+  for (const id of bulletsToDelete) {
+    room.bullets.delete(id);
   }
 }
 
@@ -741,6 +1178,7 @@ function serializeLobby(room) {
         name: p.name,
         isHost: p.isHost,
         score: p.score,
+        spaceship: p.spaceship,
       })),
   };
 }
@@ -763,9 +1201,21 @@ function serializeGame(room) {
         alive: p.alive,
         isHost: p.isHost,
         dashing: p.dashingUntil > Date.now(),
+        hasPowerup: p.hasPowerup,
+        hasRapidfire: p.hasRapidfire,
+        spaceship: p.spaceship,
       })),
     coins: Array.from(room.coins.values()).map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y) })),
     enemies: Array.from(room.enemies.values()).map((e) => ({ id: e.id, x: Math.round(e.x), y: Math.round(e.y), active: !e.respawnAt })),
+    powerups: Array.from(room.powerups.values()).map((p) => ({ id: p.id, x: Math.round(p.x), y: Math.round(p.y) })),
+    rapidfires: Array.from(room.rapidfires.values()).map((r) => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y) })),
+    bullets: Array.from(room.bullets.values()).map((b) => ({ 
+      id: b.id, 
+      x: Math.round(b.x), 
+      y: Math.round(b.y), 
+      vx: b.vx, 
+      vy: b.vy 
+    })),
   };
 }
 
@@ -779,6 +1229,7 @@ function serializeResults(room) {
       name: p.name,
       score: p.score,
       isHost: p.isHost,
+      spaceship: p.spaceship,
     }))
     .sort((a, b) => b.score - a.score);
   return result;
