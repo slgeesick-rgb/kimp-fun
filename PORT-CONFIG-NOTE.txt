@@ -1,0 +1,26 @@
+⚠️ IMPORTANT: UPDATE THIS PORT NUMBER AFTER cPanel SETUP
+
+When you create your Node.js app in cPanel, it will assign a port number.
+You MUST update this port in .htaccess file.
+
+How to find your port:
+1. Go to cPanel → Setup Node.js App
+2. Look for your app in the list
+3. Note the port number (example: 3000, 3500, 8080, etc.)
+
+Then edit .htaccess and replace BOTH occurrences of 3000:
+
+Line 4: ws://127.0.0.1:3000/$1    ← Change 3000 to your port
+Line 9: http://127.0.0.1:3000/$1  ← Change 3000 to your port
+
+Example: If cPanel assigns port 3500:
+Line 4: ws://127.0.0.1:3500/$1
+Line 9: http://127.0.0.1:3500/$1
+
+💡 TIP: Most cPanel hosting uses these common ports:
+- 3000
+- 3500  
+- 8080
+- 8443
+
+After updating, save the file and restart your Node.js app!

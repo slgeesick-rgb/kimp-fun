@@ -1,0 +1,13 @@
+{
+  "name": "kimp-fun",
+  "version": "1.0.0",
+  "description": "Kimp Fun - realtime multiplayer adventure game",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
