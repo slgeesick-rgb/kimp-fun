@@ -54,13 +54,13 @@ const elements = {
 
 const ctx = elements.canvas.getContext('2d', { 
   alpha: false,
-  desynchronized: true,
+  desynchronized: true, // Better performance for animations
   willReadFrequently: false 
 });
 
 // Enable smooth rendering
 ctx.imageSmoothingEnabled = true;
-ctx.imageSmoothingQuality = 'high';
+ctx.imageSmoothingQuality = 'low'; // Changed from 'high' to 'low' for better cloud performance
 
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = `${wsProtocol}//${location.host}`;
@@ -137,6 +137,7 @@ const state = {
   keyboardDir: { x: 0, y: 0 },
   joystickDir: { x: 0, y: 0 },
   combinedDir: { x: 0, y: 0 },
+  lastSentDir: { x: 0, y: 0 },
   lastScores: new Map(),
   scoreHistory: new Map(),
   leavingPlayers: new Map(), // playerId -> { x, y, startTime, animationTime }
@@ -148,10 +149,6 @@ const state = {
   lastRoomFetchTimestamp: 0,
   roomCreatedAt: null,
   roomTimeoutMinutes: null,
-  // Client-side prediction for smoother movement
-  predictedPosition: { x: 0, y: 0 },
-  lastServerPosition: { x: 0, y: 0 },
-  lastUpdateTime: 0,
 };
 
 // Game tips for players
@@ -714,18 +711,7 @@ const keyMap = {
 
 const heldKeys = new Set();
 
-// Helper function to check if user is typing in an input field
-function isTypingInInput(event) {
-  const target = event.target;
-  const tagName = target.tagName.toLowerCase();
-  return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
-}
-
-// Use capture phase and passive:false for instant response
 window.addEventListener('keydown', (event) => {
-  // Don't capture keys when user is typing in input fields
-  if (isTypingInInput(event)) return;
-  
   if (event.repeat) return;
   if (event.code === 'Space') {
     queuePowerup();
@@ -736,19 +722,14 @@ window.addEventListener('keydown', (event) => {
   if (!dir) return;
   heldKeys.add(dir);
   updateKeyboardDir();
-  event.preventDefault(); // Prevent any default scrolling behavior
-}, { capture: true, passive: false });
+});
 
 window.addEventListener('keyup', (event) => {
-  // Don't capture keys when user is typing in input fields
-  if (isTypingInInput(event)) return;
-  
   const dir = keyMap[event.code];
   if (!dir) return;
   heldKeys.delete(dir);
   updateKeyboardDir();
-  event.preventDefault();
-}, { capture: true, passive: false });
+});
 
 setupJoystick();
 
@@ -1089,6 +1070,25 @@ function updateFromSerializedState(serialized) {
         player.displayAngle = 0;
         return;
       }
+      
+      // For local player, use client-side prediction for smoother movement
+      if (player.id === state.playerId && state.combinedDir && player.alive) {
+        // Apply local input immediately for responsive feel
+        const hasInput = state.combinedDir.x !== 0 || state.combinedDir.y !== 0;
+        if (hasInput) {
+          player.dirX = state.combinedDir.x;
+          player.dirY = state.combinedDir.y;
+          player.displayAngle = Math.atan2(player.dirY, player.dirX);
+          
+          // Smoothly reconcile position with server (80% server, 20% prediction)
+          if (previous) {
+            const lerpFactor = 0.2;
+            player.x = player.x * (1 - lerpFactor) + previous.x * lerpFactor;
+            player.y = player.y * (1 - lerpFactor) + previous.y * lerpFactor;
+          }
+        }
+      }
+      
       const dx = previous ? player.x - previous.x : 0;
       const dy = previous ? player.y - previous.y : 0;
       const magnitude = Math.hypot(dx, dy);
@@ -1096,27 +1096,29 @@ function updateFromSerializedState(serialized) {
         const targetDirX = dx / magnitude;
         const targetDirY = dy / magnitude;
         
-        // Smooth rotation interpolation
-        if (previous && (previous.dirX || previous.dirY)) {
-          const smoothing = 0.3; // 30% new direction, 70% old direction
-          player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
-          player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
-          
-          // Normalize
-          const newMagnitude = Math.hypot(player.dirX, player.dirY);
-          if (newMagnitude > 0) {
-            player.dirX /= newMagnitude;
-            player.dirY /= newMagnitude;
+        // Smooth rotation interpolation for other players
+        if (player.id !== state.playerId) {
+          if (previous && (previous.dirX || previous.dirY)) {
+            const smoothing = 0.3; // 30% new direction, 70% old direction
+            player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
+            player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
+            
+            // Normalize
+            const newMagnitude = Math.hypot(player.dirX, player.dirY);
+            if (newMagnitude > 0) {
+              player.dirX /= newMagnitude;
+              player.dirY /= newMagnitude;
+            }
+          } else {
+            player.dirX = targetDirX;
+            player.dirY = targetDirY;
           }
-        } else {
-          player.dirX = targetDirX;
-          player.dirY = targetDirY;
+          
+          // Calculate display angle for rendering
+          player.displayAngle = Math.atan2(player.dirY, player.dirX);
         }
-        
-        // Calculate display angle for rendering
-        player.displayAngle = Math.atan2(player.dirY, player.dirX);
-      } else {
-        // Keep previous direction when not moving significantly
+      } else if (player.id !== state.playerId) {
+        // Keep previous direction when not moving significantly (for other players)
         if (previous && (previous.dirX || previous.dirY)) {
           player.dirX = previous.dirX;
           player.dirY = previous.dirY;
@@ -1253,14 +1255,6 @@ function updateFromSerializedState(serialized) {
     });
 
     state.gameState = serialized;
-    
-    // Update client-side prediction tracking
-    const currentPlayer = serialized.players?.find(p => p.id === state.playerId);
-    if (currentPlayer) {
-      state.lastServerPosition = { x: currentPlayer.x, y: currentPlayer.y };
-      state.predictedPosition = { x: currentPlayer.x, y: currentPlayer.y };
-      state.lastUpdateTime = Date.now();
-    }
   }
   if (serialized.state === 'results') {
     state.resultsState = serialized;
@@ -1567,21 +1561,18 @@ function updateScoreTracking(players) {
   });
 }
 
-// Optimized input loop - send at 60fps (16.67ms) for more responsive controls
-let lastInputSent = 0;
-let inputLoopRunning = false;
-
-function inputLoop(timestamp) {
-  if (!inputLoopRunning) return;
-  
-  requestAnimationFrame(inputLoop);
-  
-  // Throttle to approximately 60 updates per second
-  if (timestamp - lastInputSent < 16.67) return;
-  lastInputSent = timestamp;
-  
+// Send inputs at 30Hz to match server tick rate (better cloud performance)
+setInterval(() => {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   if (!state.playerId) return;
+  
+  // Only send if there's actual input or pending actions
+  const hasInput = state.combinedDir.x !== 0 || state.combinedDir.y !== 0;
+  const hasAction = state.pendingAction || state.pendingPowerup;
+  
+  if (!hasInput && !hasAction && state.lastSentDir && state.lastSentDir.x === 0 && state.lastSentDir.y === 0) {
+    return; // Skip sending if no input change
+  }
   
   state.inputSeq += 1;
   const payload = {
@@ -1591,14 +1582,14 @@ function inputLoop(timestamp) {
     action: state.pendingAction,
     powerup: state.pendingPowerup,
   };
+  
+  // Track last sent direction to avoid redundant packets
+  state.lastSentDir = { x: state.combinedDir.x, y: state.combinedDir.y };
+  
   state.pendingAction = false;
   state.pendingPowerup = false;
   sendMessage(payload);
-}
-
-// Start input loop
-inputLoopRunning = true;
-requestAnimationFrame(inputLoop);
+}, 33); // 30Hz = ~33ms interval
 
 function draw(timestamp) {
   requestAnimationFrame(draw);
@@ -2134,34 +2125,9 @@ function drawPlayers(players) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
   players.forEach((player) => {
+    const x = player.x * scaleX;
+    const y = player.y * scaleY;
     const isSelf = player.id === state.playerId;
-    let x = player.x * scaleX;
-    let y = player.y * scaleY;
-    
-    // Apply client-side prediction for current player for instant feedback
-    if (isSelf && player.alive) {
-      const now = Date.now();
-      const timeSinceUpdate = now - state.lastUpdateTime;
-      
-      // Only predict if we have input and update is recent (within 200ms)
-      if (timeSinceUpdate < 200) {
-        const speed = 3.5; // Match server speed (adjust if different)
-        const dt = timeSinceUpdate / 1000; // Convert to seconds
-        
-        // Apply predicted movement based on current input
-        const moveX = state.combinedDir.x * speed * dt;
-        const moveY = state.combinedDir.y * speed * dt;
-        
-        // Smoothly interpolate between server position and predicted position
-        const predictedX = (state.lastServerPosition.x + moveX) * scaleX;
-        const predictedY = (state.lastServerPosition.y + moveY) * scaleY;
-        
-        // Blend server and predicted positions (70% predicted for responsiveness)
-        x = x * 0.3 + predictedX * 0.7;
-        y = y * 0.3 + predictedY * 0.7;
-      }
-    }
-    
     const radius = isSelf ? 13 : 12;
 
     if (!player.alive) {
@@ -2580,17 +2546,17 @@ function resizeCanvas() {
   elements.canvas.style.width = width + 'px';
   elements.canvas.style.height = height + 'px';
   
-  // Set actual size in memory (scaled for high-DPI)
-  const dpr = window.devicePixelRatio || 1;
+  // Set actual size in memory (scaled for high-DPI, but capped for performance)
+  const dpr = Math.min(window.devicePixelRatio || 1, state.lowGraphics ? 1 : 2);
   elements.canvas.width = width * dpr;
   elements.canvas.height = height * dpr;
   
   // Scale the context to maintain proper coordinate system
   ctx.scale(dpr, dpr);
   
-  // Re-enable smooth rendering after resize
+  // Re-enable smooth rendering after resize (optimized for cloud)
   ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
+  ctx.imageSmoothingQuality = state.lowGraphics ? 'low' : 'medium';
 }
 
 function updateFromDeepLink() {

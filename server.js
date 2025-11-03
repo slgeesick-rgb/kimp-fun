@@ -17,8 +17,7 @@ const DEFAULT_CONFIG = {
   deathPenaltyEnabled: true,
 };
 
-// Increased tick rate for smoother, more responsive gameplay
-const TICK_RATE = 60;
+const TICK_RATE = 30;
 const FRAME_MS = 1000 / TICK_RATE;
 const PLAYER_RADIUS = 18;
 const COIN_RADIUS = 12;
@@ -45,7 +44,7 @@ const RAPIDFIRE_INTERVAL_MS = 150; // Fire every 150ms (6.67 shots per second)
 const BULLET_RADIUS = 4;
 const BULLET_SPEED = 500; // Pixels per second
 const BULLET_LIFETIME_MS = 2000; // Bullets last 2 seconds
-const INPUT_RATE_LIMIT_MS = 16;
+const INPUT_RATE_LIMIT_MS = 10; // Reduced from 16ms for better cloud responsiveness
 const LOBBY_HEARTBEAT_MS = 1000;
 const ROOM_SWEEP_MS = 60000;
 const RECONNECT_GRACE_MS = 10000; // 10 seconds to reconnect
@@ -74,7 +73,24 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ 
+  server,
+  perMessageDeflate: {
+    zlibDeflateOptions: {
+      chunkSize: 1024,
+      memLevel: 7,
+      level: 3 // Balanced compression for speed
+    },
+    zlibInflateOptions: {
+      chunkSize: 10 * 1024
+    },
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true,
+    serverMaxWindowBits: 10,
+    concurrencyLimit: 10,
+    threshold: 1024 // Only compress messages larger than 1KB
+  }
+});
 
 wss.on('connection', (socket, req) => {
   socket.isAlive = true;
