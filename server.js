@@ -486,6 +486,7 @@ function handleJoin(socket, payload) {
     x: Math.random() * (MAP_WIDTH - 200) + 100,
     y: Math.random() * (MAP_HEIGHT - 200) + 100,
     angle: 0,
+  aim: 0,
     score: 0,
     alive: true,
     respawnAt: 0,
@@ -551,7 +552,7 @@ function handleInput(socket, payload) {
   if (now - player.lastInputAt < INPUT_RATE_LIMIT_MS) return;
   player.lastInputAt = now;
 
-  const { seq, dir, action, powerup } = payload;
+  const { seq, dir, action, powerup, aim } = payload;
   if (typeof seq === 'number') {
     player.inputSeq = seq;
   }
@@ -565,6 +566,9 @@ function handleInput(socket, payload) {
   }
   player.wantsAction = Boolean(action);
   player.wantsPowerup = Boolean(powerup);
+  if (typeof aim === 'number' && Number.isFinite(aim)) {
+    player.aim = normalizeAngle(aim);
+  }
   room.lastActive = now;
 }
 
@@ -657,6 +661,7 @@ function startMatch(room, isRematch = false) {
     player.dashCooldownUntil = 0;
     player.x = Math.random() * (MAP_WIDTH - 400) + 200;
     player.y = Math.random() * (MAP_HEIGHT - 400) + 200;
+    player.aim = 0;
   }
 
   ensureCoins(room);
@@ -765,6 +770,12 @@ function ensureRapidfires(room, now) {
 
 function randomRange(min, max) {
   return Math.random() * (max - min) + min;
+}
+
+function normalizeAngle(angle) {
+  const twoPi = Math.PI * 2;
+  const wrapped = angle % twoPi;
+  return wrapped < 0 ? wrapped + twoPi : wrapped;
 }
 
 function updateRooms() {
@@ -1236,6 +1247,7 @@ function serializeGame(room) {
         hasPowerup: p.hasPowerup,
         hasRapidfire: p.hasRapidfire,
         spaceship: p.spaceship,
+        aim: typeof p.aim === 'number' ? p.aim : null,
       })),
     coins: Array.from(room.coins.values()).map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y) })),
     enemies: Array.from(room.enemies.values()).map((e) => ({ id: e.id, x: Math.round(e.x), y: Math.round(e.y), active: !e.respawnAt })),

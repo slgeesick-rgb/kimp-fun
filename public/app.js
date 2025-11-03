@@ -74,28 +74,10 @@ const assets = {
 const WORLD_WIDTH = 1600;
 const WORLD_HEIGHT = 900;
 const PLAYER_WORLD_RADIUS = 18;
+const PLAYER_MOVE_SPEED = 380; // pixels per second, mirrors server constant
 const ENEMY_WORLD_RADIUS = 22;
 const BLAST_EFFECT_DURATION = 4000;
 const TOTAL_SPACESHIPS = 15;
-const PLAYER_SPEED = 380; // Matches server-side base speed
-const DASH_SPEED = 650; // Matches server-side dash speed
-const DASH_DURATION_MS = 220;
-const DASH_COOLDOWN_MS = 900;
-const REMOTE_STREAM_DELAY_MS = 140; // Delay remote players to create a streamed view
-
-function initLocalPredictionState() {
-  return {
-    active: false,
-    position: null,
-    serverPosition: null,
-    lastFrameTime: null,
-    lastServerTimestamp: 0,
-    dashUntil: 0,
-    dashCooldownUntil: 0,
-    lastDir: { x: 0, y: 0 },
-    displayAngle: 0,
-  };
-}
 
 const blastPreload = new Image();
 blastPreload.src = assets.blast;
@@ -147,18 +129,21 @@ const state = {
   lastLobbyState: null,
   gameState: null,
   resultsState: null,
-  localPrediction: initLocalPredictionState(),
-  remoteStreamFrames: [],
-  remoteStreamDelay: REMOTE_STREAM_DELAY_MS,
   config: null,
   lowGraphics: false,
   muted: false,
   inputSeq: 0,
   pendingAction: false,
   pendingPowerup: false,
-  keyboardDir: { x: 0, y: 0 },
   joystickDir: { x: 0, y: 0 },
   combinedDir: { x: 0, y: 0 },
+  thrustInput: 0,
+  cursorAngle: 0,
+  cursorWorld: { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 },
+  hasPointer: false,
+  localPlayer: null,
+  lastSentInput: null,
+  lastInputSentAt: 0,
   lastScores: new Map(),
   scoreHistory: new Map(),
   leavingPlayers: new Map(), // playerId -> { x, y, startTime, animationTime }
@@ -722,8 +707,14 @@ function leaveGame() {
   state.lastLobbyState = null;
   state.gameState = null;
   state.resultsState = null;
-  state.localPrediction = initLocalPredictionState();
-  state.remoteStreamFrames = [];
+  state.localPlayer = null;
+  state.thrustInput = 0;
+  state.joystickDir = { x: 0, y: 0 };
+  state.combinedDir = { x: 0, y: 0 };
+  state.cursorAngle = 0;
+  state.hasPointer = false;
+  state.lastSentInput = null;
+  state.lastInputSentAt = 0;
   
   clearEffectLayer();
 
@@ -753,20 +744,18 @@ elements.canvas.addEventListener('mousedown', (e) => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    state.keyboardDir = { x: 0, y: 0 };
+    heldKeys.clear();
+    state.thrustInput = 0;
+    state.joystickDir = { x: 0, y: 0 };
     updateCombinedInput();
   }
 });
 
 const keyMap = {
-  ArrowUp: 'up',
-  KeyW: 'up',
-  ArrowDown: 'down',
-  KeyS: 'down',
-  ArrowLeft: 'left',
-  KeyA: 'left',
-  ArrowRight: 'right',
-  KeyD: 'right',
+  ArrowUp: 'forward',
+  KeyW: 'forward',
+  ArrowDown: 'backward',
+  KeyS: 'backward',
 };
 
 const heldKeys = new Set();
@@ -792,33 +781,21 @@ window.addEventListener('keyup', (event) => {
 });
 
 setupJoystick();
+setupPointerTracking();
 
 function queueAction() {
   state.pendingAction = true;
-  triggerLocalDash();
 }
 
 function queuePowerup() {
   state.pendingPowerup = true;
 }
 
-function triggerLocalDash() {
-  const prediction = state.localPrediction;
-  if (!prediction) return;
-  const now = performance.now();
-  if (now < prediction.dashCooldownUntil) return;
-  prediction.dashUntil = now + DASH_DURATION_MS;
-  prediction.dashCooldownUntil = now + DASH_COOLDOWN_MS;
-  prediction.active = true;
-}
-
 function updateKeyboardDir() {
-  const dir = { x: 0, y: 0 };
-  if (heldKeys.has('left')) dir.x -= 1;
-  if (heldKeys.has('right')) dir.x += 1;
-  if (heldKeys.has('up')) dir.y -= 1;
-  if (heldKeys.has('down')) dir.y += 1;
-  state.keyboardDir = normalizeVector(dir);
+  let thrust = 0;
+  if (heldKeys.has('forward')) thrust += 1;
+  if (heldKeys.has('backward')) thrust -= 1;
+  state.thrustInput = Math.max(-1, Math.min(1, thrust));
   updateCombinedInput();
 }
 
@@ -851,7 +828,12 @@ function setupJoystick() {
     const maxRadius = rect.width / 2 - 12;
     const limited = limitVector({ x, y }, maxRadius);
     elements.joystickHandle.style.transform = `translate(${limited.x}px, ${limited.y}px)`;
-    state.joystickDir = normalizeVector(limited);
+    const normalized = normalizeVector(limited);
+    state.joystickDir = normalized;
+    if (Math.hypot(normalized.x, normalized.y) > 0.01) {
+      state.cursorAngle = wrapAngle(Math.atan2(normalized.y, normalized.x));
+      state.hasPointer = false;
+    }
     updateCombinedInput();
   };
 
@@ -887,18 +869,221 @@ function setupJoystick() {
   });
 }
 
-function updateCombinedInput() {
-  const combined = {
-    x: state.keyboardDir.x + state.joystickDir.x,
-    y: state.keyboardDir.y + state.joystickDir.y,
+function setupPointerTracking() {
+  if (!elements.canvas) return;
+
+  const updateFromPointerEvent = (event) => {
+    if (!state.gameState || state.screen !== 'game') return;
+    updateCursorFromClientPoint(event.clientX, event.clientY);
   };
-  state.combinedDir = normalizeVector(combined);
+
+  elements.canvas.addEventListener('pointermove', (event) => {
+    updateFromPointerEvent(event);
+  });
+
+  elements.canvas.addEventListener('pointerdown', (event) => {
+    if (elements.canvas.setPointerCapture) {
+      elements.canvas.setPointerCapture(event.pointerId);
+    }
+    updateFromPointerEvent(event);
+  });
+
+  elements.canvas.addEventListener('pointerup', (event) => {
+    if (elements.canvas.releasePointerCapture) {
+      elements.canvas.releasePointerCapture(event.pointerId);
+    }
+  });
+
+  elements.canvas.addEventListener('pointerleave', () => {
+    state.hasPointer = false;
+    updateCombinedInput();
+  });
+}
+
+function updateCursorFromClientPoint(clientX, clientY) {
+  const rect = elements.canvas.getBoundingClientRect();
+  const ratioX = clamp((clientX - rect.left) / rect.width, 0, 1);
+  const ratioY = clamp((clientY - rect.top) / rect.height, 0, 1);
+  const worldX = ratioX * WORLD_WIDTH;
+  const worldY = ratioY * WORLD_HEIGHT;
+  state.cursorWorld = { x: worldX, y: worldY };
+
+  const originX = state.localPlayer?.x ?? WORLD_WIDTH / 2;
+  const originY = state.localPlayer?.y ?? WORLD_HEIGHT / 2;
+  const dx = worldX - originX;
+  const dy = worldY - originY;
+
+  if (Math.hypot(dx, dy) < 0.001) {
+    return;
+  }
+
+  const angle = wrapAngle(Math.atan2(dy, dx));
+  state.cursorAngle = angle;
+  state.hasPointer = true;
+
+  if (state.localPlayer) {
+    state.localPlayer.targetAngle = angle;
+  }
+
+  updateCombinedInput();
+}
+
+// Predict the local player's movement between authoritative snapshots to hide latency.
+function stepLocalPrediction(deltaMs) {
+  if (!state.localPlayer) return;
+  if (!state.gameState || state.gameState.state !== 'running') return;
+
+  const local = state.localPlayer;
+  const seconds = clamp(deltaMs / 1000, 0, 0.12);
+
+  if (!local.alive) {
+    if (typeof local.serverX === 'number') {
+      local.x = local.serverX;
+      local.y = local.serverY;
+    }
+    return;
+  }
+
+  const dir = state.combinedDir;
+  const magnitude = dir ? Math.hypot(dir.x, dir.y) : 0;
+
+  if (magnitude > 0.01) {
+    const normalized = magnitude > 1.0001 ? normalizeVector(dir) : dir;
+    const speed = PLAYER_MOVE_SPEED;
+    local.x += normalized.x * speed * seconds;
+    local.y += normalized.y * speed * seconds;
+  }
+
+  local.x = clamp(local.x, PLAYER_WORLD_RADIUS, WORLD_WIDTH - PLAYER_WORLD_RADIUS);
+  local.y = clamp(local.y, PLAYER_WORLD_RADIUS, WORLD_HEIGHT - PLAYER_WORLD_RADIUS);
+
+  if (typeof local.serverX === 'number' && typeof local.serverY === 'number') {
+    const correction = clamp(seconds * 6, 0, 1);
+    local.x += (local.serverX - local.x) * correction;
+    local.y += (local.serverY - local.y) * correction;
+  }
+
+  const pointerAngle = state.hasPointer ? state.cursorAngle : (local.targetAngle ?? state.cursorAngle);
+  if (typeof pointerAngle === 'number') {
+    local.targetAngle = pointerAngle;
+  }
+  const targetAngle = local.targetAngle ?? state.cursorAngle ?? local.angle ?? 0;
+  if (state.hasPointer) {
+    local.angle = targetAngle;
+  } else {
+    const rotationSpeed = 14; // radians per second when using non-pointer controls
+    local.angle = rotateTowards(local.angle ?? targetAngle, targetAngle, rotationSpeed * seconds);
+  }
+
+  if (!state.hasPointer && Math.hypot(state.joystickDir.x, state.joystickDir.y) < 0.01) {
+    state.cursorAngle = wrapAngle(local.angle);
+  }
+
+  local.aim = local.angle;
+}
+
+function syncLocalPlayerFromServer(serialized) {
+  if (!serialized || !serialized.players) return;
+  const serverPlayer = serialized.players.find((player) => player.id === state.playerId);
+  if (!serverPlayer) {
+    state.localPlayer = null;
+    return;
+  }
+
+  const now = performance.now();
+
+  if (!state.localPlayer) {
+    const initialAngle = typeof serverPlayer.aim === 'number'
+      ? wrapAngle(serverPlayer.aim)
+      : wrapAngle(state.cursorAngle ?? 0);
+    state.localPlayer = {
+      id: serverPlayer.id,
+      x: serverPlayer.x,
+      y: serverPlayer.y,
+      angle: initialAngle,
+      targetAngle: initialAngle,
+      serverX: serverPlayer.x,
+      serverY: serverPlayer.y,
+      lastServerAt: now,
+      alive: serverPlayer.alive,
+      hasPowerup: serverPlayer.hasPowerup,
+      hasRapidfire: serverPlayer.hasRapidfire,
+      score: serverPlayer.score,
+    };
+    return;
+  }
+
+  const local = state.localPlayer;
+  local.serverX = serverPlayer.x;
+  local.serverY = serverPlayer.y;
+  local.lastServerAt = now;
+  local.alive = serverPlayer.alive;
+  local.hasPowerup = serverPlayer.hasPowerup;
+  local.hasRapidfire = serverPlayer.hasRapidfire;
+  local.score = serverPlayer.score;
+  if (!state.hasPointer && typeof serverPlayer.aim === 'number') {
+    const serverAim = wrapAngle(serverPlayer.aim);
+    local.angle = serverAim;
+    local.targetAngle = serverAim;
+  }
+
+  // Snap aggressively if prediction diverged too far or player respawned
+  const distance = Math.hypot((local.x ?? serverPlayer.x) - serverPlayer.x, (local.y ?? serverPlayer.y) - serverPlayer.y);
+  const tolerance = serverPlayer.alive ? 120 : 12;
+  if (distance > tolerance || !serverPlayer.alive) {
+    local.x = serverPlayer.x;
+    local.y = serverPlayer.y;
+  }
+}
+
+function updateCombinedInput() {
+  const baseAngle = state.hasPointer
+    ? state.cursorAngle
+    : state.localPlayer?.angle ?? state.cursorAngle ?? 0;
+  let dirX = 0;
+  let dirY = 0;
+
+  if (Math.abs(state.thrustInput) > 0.01) {
+    dirX += Math.cos(baseAngle) * state.thrustInput;
+    dirY += Math.sin(baseAngle) * state.thrustInput;
+  }
+
+  const joystickMagnitude = Math.hypot(state.joystickDir.x, state.joystickDir.y);
+  if (joystickMagnitude > 0.01) {
+    dirX += state.joystickDir.x * joystickMagnitude;
+    dirY += state.joystickDir.y * joystickMagnitude;
+  }
+
+  state.combinedDir = normalizeVector({ x: dirX, y: dirY });
 }
 
 function normalizeVector(vec) {
   const length = Math.hypot(vec.x, vec.y);
   if (!length) return { x: 0, y: 0 };
   return { x: vec.x / length, y: vec.y / length };
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function wrapAngle(angle) {
+  const twoPi = Math.PI * 2;
+  const wrapped = angle % twoPi;
+  return wrapped < 0 ? wrapped + twoPi : wrapped;
+}
+
+function shortestAngleDiff(from, to) {
+  let diff = wrapAngle(to) - wrapAngle(from);
+  if (diff > Math.PI) diff -= Math.PI * 2;
+  if (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+function rotateTowards(current, target, maxDelta) {
+  const diff = shortestAngleDiff(current, target);
+  const clamped = clamp(diff, -maxDelta, maxDelta);
+  return wrapAngle(current + clamped);
 }
 
 function limitVector(vec, max) {
@@ -969,6 +1154,9 @@ function connectSocket({ roomId, name, hostKey, passcode, spaceship }) {
     return;
   }
 
+  state.lastSentInput = null;
+  state.lastInputSentAt = 0;
+
   if (state.ws) {
     state.ws.close(1000, 'Reconnecting');
     state.ws = null;
@@ -1024,8 +1212,6 @@ function handleServerMessage(message) {
       state.playerId = message.playerId;
       state.isHost = message.isHost;
       state.config = message.state?.config || state.config;
-      state.localPrediction = initLocalPredictionState();
-      state.remoteStreamFrames = [];
       if (message.state?.id) {
         const selfPlayer = message.state.players?.find((p) => p.id === message.playerId);
         const displayName = selfPlayer?.name || elements.createName.value || elements.joinName.value;
@@ -1054,8 +1240,6 @@ function handleServerMessage(message) {
       // If in game/results, just update state silently without switching screens
       break;
     case 'match-start':
-      state.localPrediction = initLocalPredictionState();
-      state.remoteStreamFrames = [];
       updateFromSerializedState(message.state);
       state.resultsState = null;
       showScreen('game');
@@ -1076,8 +1260,6 @@ function handleServerMessage(message) {
       updateFromSerializedState(message.state);
       state.resultsState = message.state;
       state.resultsState.winnerId = message.winnerId;
-      state.localPrediction.active = false;
-      state.remoteStreamFrames = [];
       renderResults(message);
       showScreen('results');
       break;
@@ -1128,6 +1310,9 @@ function updateFromSerializedState(serialized) {
   if (serialized.config) {
     state.config = serialized.config;
     state.roomTimeoutMinutes = serialized.config.roomTimeoutMinutes;
+  }
+  if (serialized.state && serialized.state !== 'running') {
+    state.localPlayer = null;
   }
   if (serialized.gameStartedAt) {
     state.roomCreatedAt = serialized.gameStartedAt;
@@ -1184,6 +1369,10 @@ function updateFromSerializedState(serialized) {
           player.dirY = 0;
           player.displayAngle = 0;
         }
+      }
+
+      if (typeof player.aim === 'number') {
+        player.displayAngle = wrapAngle(player.aim);
       }
     });
 
@@ -1310,16 +1499,12 @@ function updateFromSerializedState(serialized) {
       }
     });
 
-    pushRemoteStreamFrame(serialized);
-    updateLocalPredictionFromServer(serialized);
     state.gameState = serialized;
-  }
-  if (serialized.state !== 'running' && state.localPrediction) {
-    state.localPrediction.active = false;
-    state.localPrediction.serverPosition = null;
+    syncLocalPlayerFromServer(serialized);
   }
   if (serialized.state === 'results') {
     state.resultsState = serialized;
+    state.localPlayer = null;
   }
   if (serialized.targetScore) {
     state.config = { ...state.config, targetScore: serialized.targetScore };
@@ -1627,30 +1812,66 @@ setInterval(() => {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   if (!state.playerId) return;
   state.inputSeq += 1;
+  const dir = state.combinedDir;
+  const now = performance.now();
+  const timeSinceLast = now - (state.lastInputSentAt || 0);
+  const forceHeartbeat = timeSinceLast > 250;
   const payload = {
     type: 'input',
     seq: state.inputSeq,
-    dir: state.combinedDir,
+    dir,
     action: state.pendingAction,
     powerup: state.pendingPowerup,
+    aim: state.cursorAngle,
+    thrust: state.thrustInput,
   };
+
+  const last = state.lastSentInput;
+  const sameDir = last && Math.abs(last.dir.x - dir.x) < 0.001 && Math.abs(last.dir.y - dir.y) < 0.001;
+  const sameAim = last && Math.abs(shortestAngleDiff(last.aim, payload.aim)) < 0.005;
+  const sameAction = !payload.action && !payload.powerup && last && !last.action && !last.powerup;
+
+  if (forceHeartbeat || !sameDir || !sameAim || !sameAction) {
+    state.lastSentInput = {
+      dir: { x: dir.x, y: dir.y },
+      aim: payload.aim,
+      action: payload.action,
+      powerup: payload.powerup,
+    };
+    state.lastInputSentAt = now;
+    sendMessage(payload);
+  } else if (payload.action || payload.powerup) {
+    state.lastSentInput = {
+      dir: { x: dir.x, y: dir.y },
+      aim: payload.aim,
+      action: payload.action,
+      powerup: payload.powerup,
+    };
+    state.lastInputSentAt = now;
+    sendMessage(payload);
+  }
+
   state.pendingAction = false;
   state.pendingPowerup = false;
-  sendMessage(payload);
 }, 50);
 
+let lastFrameTimestamp = performance.now();
+
 function draw(timestamp) {
+  const deltaMs = timestamp - lastFrameTimestamp;
+  lastFrameTimestamp = timestamp;
   requestAnimationFrame(draw);
+
   if (!state.gameState) {
     clearCanvas();
     return;
   }
-  const frame = getRenderableGameState(timestamp) || state.gameState;
-  if (!frame) {
-    clearCanvas();
-    return;
+
+  if (deltaMs < 200) {
+    stepLocalPrediction(deltaMs);
   }
-  renderGameScene(frame, timestamp);
+
+  renderGameScene(state.gameState, timestamp);
 }
 
 requestAnimationFrame(draw);
@@ -1660,247 +1881,6 @@ function clearCanvas() {
   const height = parseFloat(elements.canvas.style.height) || elements.canvas.height;
   ctx.fillStyle = '#0A0E13';
   ctx.fillRect(0, 0, width, height);
-}
-
-function clampValue(value, min, max) {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
-}
-
-function updateLocalPrediction(timestamp) {
-  const prediction = state.localPrediction;
-  if (!prediction) return;
-  if (!prediction.position || !prediction.active) {
-    prediction.lastFrameTime = timestamp;
-    return;
-  }
-
-  if (prediction.lastFrameTime == null) {
-    prediction.lastFrameTime = timestamp;
-    return;
-  }
-
-  const deltaMs = timestamp - prediction.lastFrameTime;
-  prediction.lastFrameTime = timestamp;
-  if (deltaMs <= 0 || deltaMs > 250) {
-    // Skip unusually large gaps (tab hidden or throttled)
-    return;
-  }
-
-  const deltaSeconds = deltaMs / 1000;
-  const inputDir = state.combinedDir || { x: 0, y: 0 };
-  prediction.lastDir = inputDir;
-
-  let speed = PLAYER_SPEED;
-  if (timestamp < prediction.dashUntil) {
-    speed = DASH_SPEED;
-  }
-
-  prediction.position.x += inputDir.x * speed * deltaSeconds;
-  prediction.position.y += inputDir.y * speed * deltaSeconds;
-
-  prediction.position.x = clampValue(
-    prediction.position.x,
-    PLAYER_WORLD_RADIUS,
-    WORLD_WIDTH - PLAYER_WORLD_RADIUS,
-  );
-  prediction.position.y = clampValue(
-    prediction.position.y,
-    PLAYER_WORLD_RADIUS,
-    WORLD_HEIGHT - PLAYER_WORLD_RADIUS,
-  );
-
-  if (Math.abs(inputDir.x) > 0.001 || Math.abs(inputDir.y) > 0.001) {
-    prediction.displayAngle = Math.atan2(inputDir.y, inputDir.x);
-  }
-
-  if (prediction.serverPosition) {
-    const offsetX = prediction.serverPosition.x - prediction.position.x;
-    const offsetY = prediction.serverPosition.y - prediction.position.y;
-    const distance = Math.hypot(offsetX, offsetY);
-    if (distance > 0.5) {
-      const correction = Math.min(1, deltaSeconds * 5);
-      prediction.position.x += offsetX * correction * 0.2;
-      prediction.position.y += offsetY * correction * 0.2;
-    }
-  }
-}
-
-function updateLocalPredictionFromServer(gameState) {
-  if (!state.playerId || !gameState?.players) return;
-  const prediction = state.localPrediction;
-  if (!prediction) return;
-
-  const localPlayer = gameState.players.find((player) => player.id === state.playerId);
-  const now = performance.now();
-
-  if (!localPlayer) {
-    prediction.active = false;
-    prediction.position = null;
-    prediction.serverPosition = null;
-    return;
-  }
-
-  prediction.serverPosition = { x: localPlayer.x, y: localPlayer.y };
-  prediction.lastServerTimestamp = now;
-  prediction.displayAngle = localPlayer.displayAngle ?? prediction.displayAngle ?? 0;
-
-  if (!localPlayer.alive) {
-    prediction.active = false;
-    prediction.position = { x: localPlayer.x, y: localPlayer.y };
-    prediction.dashUntil = 0;
-    return;
-  }
-
-  if (!prediction.position) {
-    prediction.position = { x: localPlayer.x, y: localPlayer.y };
-    prediction.lastFrameTime = now;
-    prediction.active = true;
-    return;
-  }
-
-  const dx = localPlayer.x - prediction.position.x;
-  const dy = localPlayer.y - prediction.position.y;
-  const distance = Math.hypot(dx, dy);
-
-  if (distance > 90) {
-    prediction.position = { x: localPlayer.x, y: localPlayer.y };
-  } else if (distance > 2) {
-    const blend = 0.2;
-    prediction.position.x += dx * blend;
-    prediction.position.y += dy * blend;
-  }
-
-  if (localPlayer.dashing) {
-    prediction.dashUntil = Math.max(prediction.dashUntil, now + 50);
-  }
-
-  prediction.active = true;
-}
-
-function pushRemoteStreamFrame(gameState) {
-  if (!gameState?.players) return;
-  const now = performance.now();
-  if (!Array.isArray(state.remoteStreamFrames)) {
-    state.remoteStreamFrames = [];
-  }
-  const players = gameState.players
-    .filter((player) => player.id !== state.playerId)
-    .map((player) => ({
-      id: player.id,
-      x: player.x,
-      y: player.y,
-      alive: player.alive,
-      dirX: player.dirX ?? 0,
-      dirY: player.dirY ?? 0,
-      displayAngle: player.displayAngle ?? Math.atan2(player.dirY ?? 0, player.dirX ?? 0),
-    }));
-
-  state.remoteStreamFrames.push({ timestamp: now, players });
-
-  const bufferMs = Math.max(1000, state.remoteStreamDelay * 6);
-  while (
-    state.remoteStreamFrames.length &&
-    now - state.remoteStreamFrames[0].timestamp > bufferMs
-  ) {
-    state.remoteStreamFrames.shift();
-  }
-}
-
-function computeRemoteStreamingPlayers(timestamp) {
-  const frames = state.remoteStreamFrames || [];
-  if (!frames.length) return new Map();
-
-  const target = timestamp - state.remoteStreamDelay;
-  let previous = frames[0];
-  let next = frames[frames.length - 1];
-
-  for (let i = 0; i < frames.length; i += 1) {
-    const frame = frames[i];
-    if (frame.timestamp <= target) {
-      previous = frame;
-    }
-    if (frame.timestamp >= target) {
-      next = frame;
-      break;
-    }
-  }
-
-  if (!previous || !next) {
-    return new Map();
-  }
-
-  const denom = next.timestamp - previous.timestamp;
-  const lerp = denom <= 0 ? 0 : clampValue((target - previous.timestamp) / denom, 0, 1);
-
-  const prevMap = new Map(previous.players.map((player) => [player.id, player]));
-  const nextMap = new Map(next.players.map((player) => [player.id, player]));
-  const ids = new Set([...prevMap.keys(), ...nextMap.keys()]);
-
-  const result = new Map();
-  ids.forEach((id) => {
-    const start = prevMap.get(id) || nextMap.get(id);
-    const end = nextMap.get(id) || prevMap.get(id);
-    if (!start || !end) return;
-    const x = start.x + (end.x - start.x) * lerp;
-    const y = start.y + (end.y - start.y) * lerp;
-    const dirX = start.dirX + (end.dirX - start.dirX) * lerp;
-    const dirY = start.dirY + (end.dirY - start.dirY) * lerp;
-    const angle = Math.atan2(dirY, dirX);
-    result.set(id, {
-      x,
-      y,
-      dirX,
-      dirY,
-      displayAngle: angle,
-      alive: start.alive && end.alive,
-    });
-  });
-
-  return result;
-}
-
-function getRenderableGameState(timestamp) {
-  const base = state.gameState;
-  if (!base || base.state !== 'running' || !Array.isArray(base.players)) {
-    return base;
-  }
-
-  const localPrediction = state.localPrediction;
-  updateLocalPrediction(timestamp);
-  const remoteSnapshots = computeRemoteStreamingPlayers(timestamp);
-
-  const players = base.players.map((player) => {
-    if (player.id === state.playerId && localPrediction?.position && player.alive) {
-      return {
-        ...player,
-        x: localPrediction.position.x,
-        y: localPrediction.position.y,
-        dirX: localPrediction.lastDir?.x ?? player.dirX ?? 0,
-        dirY: localPrediction.lastDir?.y ?? player.dirY ?? 0,
-        displayAngle:
-          localPrediction.displayAngle ?? player.displayAngle ?? Math.atan2(player.dirY ?? 0, player.dirX ?? 0),
-        dashing: timestamp < localPrediction.dashUntil,
-      };
-    }
-
-    const streamed = remoteSnapshots.get(player.id);
-    if (streamed && player.alive) {
-      return {
-        ...player,
-        x: streamed.x,
-        y: streamed.y,
-        dirX: streamed.dirX,
-        dirY: streamed.dirY,
-        displayAngle: streamed.displayAngle,
-      };
-    }
-
-    return player;
-  });
-
-  return { ...base, players };
 }
 
 function renderGameScene(game, timestamp) {
@@ -1920,7 +1900,8 @@ function renderGameScene(game, timestamp) {
   drawRapidfires(game.rapidfires || [], timestamp);
   drawEnemies(game.enemies || []);
   drawBullets(game.bullets || [], timestamp);
-  drawPlayers(game.players || []);
+  const renderPlayers = preparePlayersForRender(game.players || []);
+  drawPlayers(renderPlayers, timestamp);
   drawPowerupEffects(timestamp);
   drawLeavingPlayers(timestamp);
 
@@ -2415,7 +2396,26 @@ function drawFireTail(x, y, dirX, dirY, radius, timestamp) {
   ctx.restore();
 }
 
-function drawPlayers(players) {
+// Merge predicted local state into the render list without mutating the server snapshot.
+function preparePlayersForRender(players) {
+  if (!state.localPlayer) return players;
+  const local = state.localPlayer;
+  return players.map((player) => {
+    if (player.id !== local.id) return player;
+    return {
+      ...player,
+      x: local.x,
+      y: local.y,
+      displayAngle: local.angle,
+      renderAngle: local.angle,
+      dirX: state.combinedDir?.x ?? 0,
+      dirY: state.combinedDir?.y ?? 0,
+      aim: local.angle,
+    };
+  });
+}
+
+function drawPlayers(players, timestamp) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
   players.forEach((player) => {
@@ -2461,7 +2461,7 @@ function drawPlayers(players) {
       }
       
       if (isMoving && !state.lowGraphics) {
-        drawFireTail(x, y, fireDirX, fireDirY, radius, Date.now());
+        drawFireTail(x, y, fireDirX, fireDirY, radius, timestamp);
       }
       // Respawn effect - blinking and glowing
       const respawnEffect = state.respawnEffects.get(player.id);
@@ -2520,8 +2520,11 @@ function drawPlayers(players) {
   const spaceshipImg = player.spaceship ? spaceshipImages[player.spaceship] : null;
         if (spaceshipImg && spaceshipImg.complete) {
           const size = radius * 3; // Image size
-          const angle = player.displayAngle !== undefined ? player.displayAngle : 
-                       (player.dirX || player.dirY ? Math.atan2(player.dirY || 0, player.dirX || 0) : 0);
+          const angleSource =
+            player.renderAngle !== undefined ? player.renderAngle :
+            player.displayAngle !== undefined ? player.displayAngle :
+            (player.dirX || player.dirY ? Math.atan2(player.dirY || 0, player.dirX || 0) : 0);
+          const angle = angleSource;
           
           ctx.save();
           ctx.translate(x, y);
