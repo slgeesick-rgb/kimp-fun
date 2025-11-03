@@ -18,6 +18,7 @@ const DEFAULT_CONFIG = {
 };
 
 const TICK_RATE = 20; // Reduced from 30 to 20 for better network performance
+const BROADCAST_INTERVAL_MS = 100; // Broadcast full state every 100ms (10Hz)
 const FRAME_MS = 1000 / TICK_RATE;
 const PLAYER_RADIUS = 18;
 const COIN_RADIUS = 12;
@@ -281,6 +282,7 @@ async function handleCreateRoom(req, res) {
     bullets: new Map(),
     reservedNames: new Set([hostName.toLowerCase()]),
     lastLobbyBroadcast: Date.now(),
+    lastBroadcast: 0, // Add this line
   };
   rooms.set(roomId, room);
 
@@ -845,16 +847,16 @@ function updateMatch(room, now) {
   ensurePowerups(room, now);
   ensureRapidfires(room, now);
   
-  // Only broadcast if there are active players connected
   const hasActivePlayers = Array.from(room.players.values()).some(
     p => !p.disconnected && p.connection && p.connection.readyState === p.connection.OPEN
   );
   
-  if (hasActivePlayers) {
+  if (hasActivePlayers && now - room.lastBroadcast > BROADCAST_INTERVAL_MS) {
     broadcast(room, {
       type: 'state',
       state: serializeGame(room),
     });
+    room.lastBroadcast = now;
   }
 }
 
