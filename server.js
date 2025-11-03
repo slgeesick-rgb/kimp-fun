@@ -44,7 +44,7 @@ const RAPIDFIRE_INTERVAL_MS = 150; // Fire every 150ms (6.67 shots per second)
 const BULLET_RADIUS = 4;
 const BULLET_SPEED = 500; // Pixels per second
 const BULLET_LIFETIME_MS = 2000; // Bullets last 2 seconds
-const INPUT_RATE_LIMIT_MS = 10; // Reduced from 16ms for better cloud responsiveness
+const INPUT_RATE_LIMIT_MS = 16;
 const LOBBY_HEARTBEAT_MS = 1000;
 const ROOM_SWEEP_MS = 60000;
 const RECONNECT_GRACE_MS = 10000; // 10 seconds to reconnect
@@ -73,24 +73,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ 
-  server,
-  perMessageDeflate: {
-    zlibDeflateOptions: {
-      chunkSize: 1024,
-      memLevel: 7,
-      level: 3 // Balanced compression for speed
-    },
-    zlibInflateOptions: {
-      chunkSize: 10 * 1024
-    },
-    clientNoContextTakeover: true,
-    serverNoContextTakeover: true,
-    serverMaxWindowBits: 10,
-    concurrencyLimit: 10,
-    threshold: 1024 // Only compress messages larger than 1KB
-  }
-});
+const wss = new WebSocketServer({ server });
 
 wss.on('connection', (socket, req) => {
   socket.isAlive = true;
@@ -372,6 +355,9 @@ function handleSocketMessage(socket, data) {
     case 'rematch':
       handleRematch(socket, data);
       break;
+    case 'timeout':
+      handleTimeout(socket, data);
+      break;
     case 'ping':
       socket.send(JSON.stringify({ type: 'pong' }));
       break;
@@ -612,6 +598,27 @@ function handleRematch(socket, payload) {
   startMatch(room, true);
 }
 
+function handleTimeout(socket, payload) {
+  const player = resolvePlayer(socket);
+  if (!player) return;
+  const room = rooms.get(player.roomId);
+  if (!room) return;
+  if (!player.isHost) return;
+  if (room.state !== 'running') return;
+
+  // End the game due to timeout
+  room.state = 'results';
+  room.winnerId = null; // No winner for timeout
+  room.lastActive = Date.now();
+  
+  broadcast(room, {
+    type: 'match-end',
+    winnerId: null,
+    timedOut: true,
+    state: serializeResults(room),
+  });
+}
+
 function startMatch(room, isRematch = false) {
   room.state = 'running';
   room.matchId += 1;
@@ -777,25 +784,6 @@ function updateRooms() {
 
 function updateMatch(room, now) {
   const delta = FRAME_MS / 1000;
-
-  // Check if room has timed out
-  if (room.createdAt && room.config.roomTimeoutMinutes) {
-    const timeoutMs = room.config.roomTimeoutMinutes * 60 * 1000;
-    const elapsedMs = now - room.createdAt;
-    if (elapsedMs >= timeoutMs) {
-      // Game has timed out - end the match
-      room.state = 'results';
-      room.winnerId = null; // No winner for timeout
-      room.lastActive = now;
-      broadcast(room, {
-        type: 'match-end',
-        winnerId: null,
-        timedOut: true,
-        state: serializeResults(room),
-      });
-      return; // Stop processing this frame
-    }
-  }
 
   for (const player of room.players.values()) {
     if (player.disconnected || !player.connection || player.connection.readyState !== player.connection.OPEN) continue;

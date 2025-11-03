@@ -54,13 +54,13 @@ const elements = {
 
 const ctx = elements.canvas.getContext('2d', { 
   alpha: false,
-  desynchronized: true, // Better performance for animations
+  desynchronized: true,
   willReadFrequently: false 
 });
 
 // Enable smooth rendering
 ctx.imageSmoothingEnabled = true;
-ctx.imageSmoothingQuality = 'low'; // Changed from 'high' to 'low' for better cloud performance
+ctx.imageSmoothingQuality = 'high';
 
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = `${wsProtocol}//${location.host}`;
@@ -77,6 +77,25 @@ const PLAYER_WORLD_RADIUS = 18;
 const ENEMY_WORLD_RADIUS = 22;
 const BLAST_EFFECT_DURATION = 4000;
 const TOTAL_SPACESHIPS = 15;
+const PLAYER_SPEED = 380; // Matches server-side base speed
+const DASH_SPEED = 650; // Matches server-side dash speed
+const DASH_DURATION_MS = 220;
+const DASH_COOLDOWN_MS = 900;
+const REMOTE_STREAM_DELAY_MS = 140; // Delay remote players to create a streamed view
+
+function initLocalPredictionState() {
+  return {
+    active: false,
+    position: null,
+    serverPosition: null,
+    lastFrameTime: null,
+    lastServerTimestamp: 0,
+    dashUntil: 0,
+    dashCooldownUntil: 0,
+    lastDir: { x: 0, y: 0 },
+    displayAngle: 0,
+  };
+}
 
 const blastPreload = new Image();
 blastPreload.src = assets.blast;
@@ -128,6 +147,9 @@ const state = {
   lastLobbyState: null,
   gameState: null,
   resultsState: null,
+  localPrediction: initLocalPredictionState(),
+  remoteStreamFrames: [],
+  remoteStreamDelay: REMOTE_STREAM_DELAY_MS,
   config: null,
   lowGraphics: false,
   muted: false,
@@ -137,7 +159,6 @@ const state = {
   keyboardDir: { x: 0, y: 0 },
   joystickDir: { x: 0, y: 0 },
   combinedDir: { x: 0, y: 0 },
-  lastSentDir: { x: 0, y: 0 },
   lastScores: new Map(),
   scoreHistory: new Map(),
   leavingPlayers: new Map(), // playerId -> { x, y, startTime, animationTime }
@@ -190,6 +211,7 @@ function stopTipRotation() {
 
 // Room timer functions
 let timerInterval = null;
+let timeoutTriggered = false;
 
 function updateRoomTimer() {
   if (!state.roomCreatedAt || !state.roomTimeoutMinutes) {
@@ -204,7 +226,12 @@ function updateRoomTimer() {
   if (remainingMs <= 0) {
     elements.timerDisplay.textContent = '00:00';
     elements.timerDisplay.className = 'timer-display critical';
-    // Server will handle game timeout and send match-end message
+    
+    // Trigger timeout only once and only if game is running
+    if (!timeoutTriggered && state.screen === 'game') {
+      timeoutTriggered = true;
+      handleGameTimeout();
+    }
     return;
   }
 
@@ -224,8 +251,39 @@ function updateRoomTimer() {
   }
 }
 
+function handleGameTimeout() {
+  hideRoomTimer();
+  
+  // Notify server about timeout (only host can do this)
+  if (state.isHost && state.ws) {
+    sendMessage({ type: 'timeout' });
+  }
+  
+  // Create a timeout result state
+  const timeoutResults = {
+    players: state.gameState?.players || [],
+    scores: Array.from(state.lastScores.entries()).map(([id, score]) => {
+      const player = state.gameState?.players?.find(p => p.id === id);
+      return {
+        id,
+        name: player?.name || 'Unknown',
+        score,
+        spaceship: player?.spaceship
+      };
+    }),
+    config: state.config
+  };
+  
+  state.resultsState = timeoutResults;
+  
+  // Show results with timeout message
+  showScreen('results');
+  renderResults({ winnerId: null, state: timeoutResults, timedOut: true });
+}
+
 function startRoomTimer() {
   if (timerInterval) clearInterval(timerInterval);
+  timeoutTriggered = false; // Reset timeout flag when starting timer
   if (elements.roomTimer) {
     elements.roomTimer.style.display = 'flex';
   }
@@ -664,6 +722,8 @@ function leaveGame() {
   state.lastLobbyState = null;
   state.gameState = null;
   state.resultsState = null;
+  state.localPrediction = initLocalPredictionState();
+  state.remoteStreamFrames = [];
   
   clearEffectLayer();
 
@@ -735,10 +795,21 @@ setupJoystick();
 
 function queueAction() {
   state.pendingAction = true;
+  triggerLocalDash();
 }
 
 function queuePowerup() {
   state.pendingPowerup = true;
+}
+
+function triggerLocalDash() {
+  const prediction = state.localPrediction;
+  if (!prediction) return;
+  const now = performance.now();
+  if (now < prediction.dashCooldownUntil) return;
+  prediction.dashUntil = now + DASH_DURATION_MS;
+  prediction.dashCooldownUntil = now + DASH_COOLDOWN_MS;
+  prediction.active = true;
 }
 
 function updateKeyboardDir() {
@@ -953,6 +1024,8 @@ function handleServerMessage(message) {
       state.playerId = message.playerId;
       state.isHost = message.isHost;
       state.config = message.state?.config || state.config;
+      state.localPrediction = initLocalPredictionState();
+      state.remoteStreamFrames = [];
       if (message.state?.id) {
         const selfPlayer = message.state.players?.find((p) => p.id === message.playerId);
         const displayName = selfPlayer?.name || elements.createName.value || elements.joinName.value;
@@ -981,6 +1054,8 @@ function handleServerMessage(message) {
       // If in game/results, just update state silently without switching screens
       break;
     case 'match-start':
+      state.localPrediction = initLocalPredictionState();
+      state.remoteStreamFrames = [];
       updateFromSerializedState(message.state);
       state.resultsState = null;
       showScreen('game');
@@ -1000,9 +1075,11 @@ function handleServerMessage(message) {
     case 'match-end':
       updateFromSerializedState(message.state);
       state.resultsState = message.state;
+      state.resultsState.winnerId = message.winnerId;
+      state.localPrediction.active = false;
+      state.remoteStreamFrames = [];
       renderResults(message);
       showScreen('results');
-      // Keep timer running in results
       break;
     case 'host-change':
       if (message.playerId === state.playerId) {
@@ -1070,25 +1147,6 @@ function updateFromSerializedState(serialized) {
         player.displayAngle = 0;
         return;
       }
-      
-      // For local player, use client-side prediction for smoother movement
-      if (player.id === state.playerId && state.combinedDir && player.alive) {
-        // Apply local input immediately for responsive feel
-        const hasInput = state.combinedDir.x !== 0 || state.combinedDir.y !== 0;
-        if (hasInput) {
-          player.dirX = state.combinedDir.x;
-          player.dirY = state.combinedDir.y;
-          player.displayAngle = Math.atan2(player.dirY, player.dirX);
-          
-          // Smoothly reconcile position with server (80% server, 20% prediction)
-          if (previous) {
-            const lerpFactor = 0.2;
-            player.x = player.x * (1 - lerpFactor) + previous.x * lerpFactor;
-            player.y = player.y * (1 - lerpFactor) + previous.y * lerpFactor;
-          }
-        }
-      }
-      
       const dx = previous ? player.x - previous.x : 0;
       const dy = previous ? player.y - previous.y : 0;
       const magnitude = Math.hypot(dx, dy);
@@ -1096,29 +1154,27 @@ function updateFromSerializedState(serialized) {
         const targetDirX = dx / magnitude;
         const targetDirY = dy / magnitude;
         
-        // Smooth rotation interpolation for other players
-        if (player.id !== state.playerId) {
-          if (previous && (previous.dirX || previous.dirY)) {
-            const smoothing = 0.3; // 30% new direction, 70% old direction
-            player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
-            player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
-            
-            // Normalize
-            const newMagnitude = Math.hypot(player.dirX, player.dirY);
-            if (newMagnitude > 0) {
-              player.dirX /= newMagnitude;
-              player.dirY /= newMagnitude;
-            }
-          } else {
-            player.dirX = targetDirX;
-            player.dirY = targetDirY;
-          }
+        // Smooth rotation interpolation
+        if (previous && (previous.dirX || previous.dirY)) {
+          const smoothing = 0.3; // 30% new direction, 70% old direction
+          player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
+          player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
           
-          // Calculate display angle for rendering
-          player.displayAngle = Math.atan2(player.dirY, player.dirX);
+          // Normalize
+          const newMagnitude = Math.hypot(player.dirX, player.dirY);
+          if (newMagnitude > 0) {
+            player.dirX /= newMagnitude;
+            player.dirY /= newMagnitude;
+          }
+        } else {
+          player.dirX = targetDirX;
+          player.dirY = targetDirY;
         }
-      } else if (player.id !== state.playerId) {
-        // Keep previous direction when not moving significantly (for other players)
+        
+        // Calculate display angle for rendering
+        player.displayAngle = Math.atan2(player.dirY, player.dirX);
+      } else {
+        // Keep previous direction when not moving significantly
         if (previous && (previous.dirX || previous.dirY)) {
           player.dirX = previous.dirX;
           player.dirY = previous.dirY;
@@ -1254,7 +1310,13 @@ function updateFromSerializedState(serialized) {
       }
     });
 
+    pushRemoteStreamFrame(serialized);
+    updateLocalPredictionFromServer(serialized);
     state.gameState = serialized;
+  }
+  if (serialized.state !== 'running' && state.localPrediction) {
+    state.localPrediction.active = false;
+    state.localPrediction.serverPosition = null;
   }
   if (serialized.state === 'results') {
     state.resultsState = serialized;
@@ -1561,19 +1623,9 @@ function updateScoreTracking(players) {
   });
 }
 
-// Send inputs at 30Hz to match server tick rate (better cloud performance)
 setInterval(() => {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   if (!state.playerId) return;
-  
-  // Only send if there's actual input or pending actions
-  const hasInput = state.combinedDir.x !== 0 || state.combinedDir.y !== 0;
-  const hasAction = state.pendingAction || state.pendingPowerup;
-  
-  if (!hasInput && !hasAction && state.lastSentDir && state.lastSentDir.x === 0 && state.lastSentDir.y === 0) {
-    return; // Skip sending if no input change
-  }
-  
   state.inputSeq += 1;
   const payload = {
     type: 'input',
@@ -1582,14 +1634,10 @@ setInterval(() => {
     action: state.pendingAction,
     powerup: state.pendingPowerup,
   };
-  
-  // Track last sent direction to avoid redundant packets
-  state.lastSentDir = { x: state.combinedDir.x, y: state.combinedDir.y };
-  
   state.pendingAction = false;
   state.pendingPowerup = false;
   sendMessage(payload);
-}, 33); // 30Hz = ~33ms interval
+}, 50);
 
 function draw(timestamp) {
   requestAnimationFrame(draw);
@@ -1597,7 +1645,12 @@ function draw(timestamp) {
     clearCanvas();
     return;
   }
-  renderGameScene(state.gameState, timestamp);
+  const frame = getRenderableGameState(timestamp) || state.gameState;
+  if (!frame) {
+    clearCanvas();
+    return;
+  }
+  renderGameScene(frame, timestamp);
 }
 
 requestAnimationFrame(draw);
@@ -1607,6 +1660,247 @@ function clearCanvas() {
   const height = parseFloat(elements.canvas.style.height) || elements.canvas.height;
   ctx.fillStyle = '#0A0E13';
   ctx.fillRect(0, 0, width, height);
+}
+
+function clampValue(value, min, max) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function updateLocalPrediction(timestamp) {
+  const prediction = state.localPrediction;
+  if (!prediction) return;
+  if (!prediction.position || !prediction.active) {
+    prediction.lastFrameTime = timestamp;
+    return;
+  }
+
+  if (prediction.lastFrameTime == null) {
+    prediction.lastFrameTime = timestamp;
+    return;
+  }
+
+  const deltaMs = timestamp - prediction.lastFrameTime;
+  prediction.lastFrameTime = timestamp;
+  if (deltaMs <= 0 || deltaMs > 250) {
+    // Skip unusually large gaps (tab hidden or throttled)
+    return;
+  }
+
+  const deltaSeconds = deltaMs / 1000;
+  const inputDir = state.combinedDir || { x: 0, y: 0 };
+  prediction.lastDir = inputDir;
+
+  let speed = PLAYER_SPEED;
+  if (timestamp < prediction.dashUntil) {
+    speed = DASH_SPEED;
+  }
+
+  prediction.position.x += inputDir.x * speed * deltaSeconds;
+  prediction.position.y += inputDir.y * speed * deltaSeconds;
+
+  prediction.position.x = clampValue(
+    prediction.position.x,
+    PLAYER_WORLD_RADIUS,
+    WORLD_WIDTH - PLAYER_WORLD_RADIUS,
+  );
+  prediction.position.y = clampValue(
+    prediction.position.y,
+    PLAYER_WORLD_RADIUS,
+    WORLD_HEIGHT - PLAYER_WORLD_RADIUS,
+  );
+
+  if (Math.abs(inputDir.x) > 0.001 || Math.abs(inputDir.y) > 0.001) {
+    prediction.displayAngle = Math.atan2(inputDir.y, inputDir.x);
+  }
+
+  if (prediction.serverPosition) {
+    const offsetX = prediction.serverPosition.x - prediction.position.x;
+    const offsetY = prediction.serverPosition.y - prediction.position.y;
+    const distance = Math.hypot(offsetX, offsetY);
+    if (distance > 0.5) {
+      const correction = Math.min(1, deltaSeconds * 5);
+      prediction.position.x += offsetX * correction * 0.2;
+      prediction.position.y += offsetY * correction * 0.2;
+    }
+  }
+}
+
+function updateLocalPredictionFromServer(gameState) {
+  if (!state.playerId || !gameState?.players) return;
+  const prediction = state.localPrediction;
+  if (!prediction) return;
+
+  const localPlayer = gameState.players.find((player) => player.id === state.playerId);
+  const now = performance.now();
+
+  if (!localPlayer) {
+    prediction.active = false;
+    prediction.position = null;
+    prediction.serverPosition = null;
+    return;
+  }
+
+  prediction.serverPosition = { x: localPlayer.x, y: localPlayer.y };
+  prediction.lastServerTimestamp = now;
+  prediction.displayAngle = localPlayer.displayAngle ?? prediction.displayAngle ?? 0;
+
+  if (!localPlayer.alive) {
+    prediction.active = false;
+    prediction.position = { x: localPlayer.x, y: localPlayer.y };
+    prediction.dashUntil = 0;
+    return;
+  }
+
+  if (!prediction.position) {
+    prediction.position = { x: localPlayer.x, y: localPlayer.y };
+    prediction.lastFrameTime = now;
+    prediction.active = true;
+    return;
+  }
+
+  const dx = localPlayer.x - prediction.position.x;
+  const dy = localPlayer.y - prediction.position.y;
+  const distance = Math.hypot(dx, dy);
+
+  if (distance > 90) {
+    prediction.position = { x: localPlayer.x, y: localPlayer.y };
+  } else if (distance > 2) {
+    const blend = 0.2;
+    prediction.position.x += dx * blend;
+    prediction.position.y += dy * blend;
+  }
+
+  if (localPlayer.dashing) {
+    prediction.dashUntil = Math.max(prediction.dashUntil, now + 50);
+  }
+
+  prediction.active = true;
+}
+
+function pushRemoteStreamFrame(gameState) {
+  if (!gameState?.players) return;
+  const now = performance.now();
+  if (!Array.isArray(state.remoteStreamFrames)) {
+    state.remoteStreamFrames = [];
+  }
+  const players = gameState.players
+    .filter((player) => player.id !== state.playerId)
+    .map((player) => ({
+      id: player.id,
+      x: player.x,
+      y: player.y,
+      alive: player.alive,
+      dirX: player.dirX ?? 0,
+      dirY: player.dirY ?? 0,
+      displayAngle: player.displayAngle ?? Math.atan2(player.dirY ?? 0, player.dirX ?? 0),
+    }));
+
+  state.remoteStreamFrames.push({ timestamp: now, players });
+
+  const bufferMs = Math.max(1000, state.remoteStreamDelay * 6);
+  while (
+    state.remoteStreamFrames.length &&
+    now - state.remoteStreamFrames[0].timestamp > bufferMs
+  ) {
+    state.remoteStreamFrames.shift();
+  }
+}
+
+function computeRemoteStreamingPlayers(timestamp) {
+  const frames = state.remoteStreamFrames || [];
+  if (!frames.length) return new Map();
+
+  const target = timestamp - state.remoteStreamDelay;
+  let previous = frames[0];
+  let next = frames[frames.length - 1];
+
+  for (let i = 0; i < frames.length; i += 1) {
+    const frame = frames[i];
+    if (frame.timestamp <= target) {
+      previous = frame;
+    }
+    if (frame.timestamp >= target) {
+      next = frame;
+      break;
+    }
+  }
+
+  if (!previous || !next) {
+    return new Map();
+  }
+
+  const denom = next.timestamp - previous.timestamp;
+  const lerp = denom <= 0 ? 0 : clampValue((target - previous.timestamp) / denom, 0, 1);
+
+  const prevMap = new Map(previous.players.map((player) => [player.id, player]));
+  const nextMap = new Map(next.players.map((player) => [player.id, player]));
+  const ids = new Set([...prevMap.keys(), ...nextMap.keys()]);
+
+  const result = new Map();
+  ids.forEach((id) => {
+    const start = prevMap.get(id) || nextMap.get(id);
+    const end = nextMap.get(id) || prevMap.get(id);
+    if (!start || !end) return;
+    const x = start.x + (end.x - start.x) * lerp;
+    const y = start.y + (end.y - start.y) * lerp;
+    const dirX = start.dirX + (end.dirX - start.dirX) * lerp;
+    const dirY = start.dirY + (end.dirY - start.dirY) * lerp;
+    const angle = Math.atan2(dirY, dirX);
+    result.set(id, {
+      x,
+      y,
+      dirX,
+      dirY,
+      displayAngle: angle,
+      alive: start.alive && end.alive,
+    });
+  });
+
+  return result;
+}
+
+function getRenderableGameState(timestamp) {
+  const base = state.gameState;
+  if (!base || base.state !== 'running' || !Array.isArray(base.players)) {
+    return base;
+  }
+
+  const localPrediction = state.localPrediction;
+  updateLocalPrediction(timestamp);
+  const remoteSnapshots = computeRemoteStreamingPlayers(timestamp);
+
+  const players = base.players.map((player) => {
+    if (player.id === state.playerId && localPrediction?.position && player.alive) {
+      return {
+        ...player,
+        x: localPrediction.position.x,
+        y: localPrediction.position.y,
+        dirX: localPrediction.lastDir?.x ?? player.dirX ?? 0,
+        dirY: localPrediction.lastDir?.y ?? player.dirY ?? 0,
+        displayAngle:
+          localPrediction.displayAngle ?? player.displayAngle ?? Math.atan2(player.dirY ?? 0, player.dirX ?? 0),
+        dashing: timestamp < localPrediction.dashUntil,
+      };
+    }
+
+    const streamed = remoteSnapshots.get(player.id);
+    if (streamed && player.alive) {
+      return {
+        ...player,
+        x: streamed.x,
+        y: streamed.y,
+        dirX: streamed.dirX,
+        dirY: streamed.dirY,
+        displayAngle: streamed.displayAngle,
+      };
+    }
+
+    return player;
+  });
+
+  return { ...base, players };
 }
 
 function renderGameScene(game, timestamp) {
@@ -2546,17 +2840,17 @@ function resizeCanvas() {
   elements.canvas.style.width = width + 'px';
   elements.canvas.style.height = height + 'px';
   
-  // Set actual size in memory (scaled for high-DPI, but capped for performance)
-  const dpr = Math.min(window.devicePixelRatio || 1, state.lowGraphics ? 1 : 2);
+  // Set actual size in memory (scaled for high-DPI)
+  const dpr = window.devicePixelRatio || 1;
   elements.canvas.width = width * dpr;
   elements.canvas.height = height * dpr;
   
   // Scale the context to maintain proper coordinate system
   ctx.scale(dpr, dpr);
   
-  // Re-enable smooth rendering after resize (optimized for cloud)
+  // Re-enable smooth rendering after resize
   ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = state.lowGraphics ? 'low' : 'medium';
+  ctx.imageSmoothingQuality = 'high';
 }
 
 function updateFromDeepLink() {
