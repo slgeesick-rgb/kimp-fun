@@ -50,6 +50,7 @@ const elements = {
   tipText: document.getElementById('tip-text'),
   roomTimer: document.getElementById('room-timer'),
   timerDisplay: document.getElementById('timer-display'),
+  connectionIndicator: document.getElementById('connection-indicator'),
 };
 
 const ctx = elements.canvas.getContext('2d', { 
@@ -155,6 +156,11 @@ const state = {
   lastRoomFetchTimestamp: 0,
   roomCreatedAt: null,
   roomTimeoutMinutes: null,
+  // Connection quality monitoring
+  lastServerUpdate: 0,
+  updateLatency: [],
+  messagesSent: 0,
+  messagesReceived: 0,
 };
 
 // Game tips for players
@@ -285,6 +291,49 @@ function hideRoomTimer() {
     elements.roomTimer.style.display = 'none';
   }
 }
+
+// Connection quality monitoring
+function updateConnectionQuality() {
+  if (!elements.connectionIndicator) return;
+  
+  // Only show during active game
+  if (state.screen !== 'game' || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    elements.connectionIndicator.style.display = 'none';
+    return;
+  }
+  
+  elements.connectionIndicator.style.display = 'flex';
+  
+  // Calculate average latency
+  if (state.updateLatency.length === 0) return;
+  
+  const avgLatency = state.updateLatency.reduce((a, b) => a + b, 0) / state.updateLatency.length;
+  const maxLatency = Math.max(...state.updateLatency);
+  
+  // Classify connection quality
+  let quality = 'good';
+  let text = 'Good';
+  
+  if (avgLatency > 100 || maxLatency > 200) {
+    quality = 'fair';
+    text = 'Fair';
+  }
+  
+  if (avgLatency > 200 || maxLatency > 400) {
+    quality = 'poor';
+    text = 'Poor';
+  }
+  
+  // Update indicator
+  elements.connectionIndicator.className = `connection-indicator ${quality}`;
+  const textElement = elements.connectionIndicator.querySelector('.connection-text');
+  if (textElement) {
+    textElement.textContent = text;
+  }
+}
+
+// Update connection quality every 2 seconds
+setInterval(updateConnectionQuality, 2000);
 
 // Session persistence functions
 function saveSession() {
@@ -1204,9 +1253,23 @@ function connectSocket({ roomId, name, hostKey, passcode, spaceship }) {
 function sendMessage(payload) {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   state.ws.send(JSON.stringify(payload));
+  state.messagesSent++;
 }
 
 function handleServerMessage(message) {
+  // Track connection quality
+  state.messagesReceived++;
+  const now = performance.now();
+  if (state.lastServerUpdate > 0) {
+    const latency = now - state.lastServerUpdate;
+    state.updateLatency.push(latency);
+    // Keep only last 20 measurements
+    if (state.updateLatency.length > 20) {
+      state.updateLatency.shift();
+    }
+  }
+  state.lastServerUpdate = now;
+  
   switch (message.type) {
     case 'joined':
       state.playerId = message.playerId;
@@ -1332,8 +1395,20 @@ function updateFromSerializedState(serialized) {
         player.displayAngle = 0;
         return;
       }
-      const dx = previous ? player.x - previous.x : 0;
-      const dy = previous ? player.y - previous.y : 0;
+      
+      // Store target position for interpolation
+      player.targetX = player.x;
+      player.targetY = player.y;
+      
+      // For non-local players, smoothly interpolate to the target position
+      if (previous && player.id !== state.playerId) {
+        const lerpFactor = 0.4; // Smoother interpolation: 40% towards target
+        player.x = previous.x * (1 - lerpFactor) + player.targetX * lerpFactor;
+        player.y = previous.y * (1 - lerpFactor) + player.targetY * lerpFactor;
+      }
+      
+      const dx = player.targetX - (previous ? previous.x : player.x);
+      const dy = player.targetY - (previous ? previous.y : player.y);
       const magnitude = Math.hypot(dx, dy);
       if (magnitude > 0.5) {
         const targetDirX = dx / magnitude;
@@ -1341,7 +1416,7 @@ function updateFromSerializedState(serialized) {
         
         // Smooth rotation interpolation
         if (previous && (previous.dirX || previous.dirY)) {
-          const smoothing = 0.3; // 30% new direction, 70% old direction
+          const smoothing = 0.35; // 35% new direction, 65% old direction
           player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
           player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
           
@@ -1815,7 +1890,7 @@ setInterval(() => {
   const dir = state.combinedDir;
   const now = performance.now();
   const timeSinceLast = now - (state.lastInputSentAt || 0);
-  const forceHeartbeat = timeSinceLast > 250;
+  const forceHeartbeat = timeSinceLast > 500; // Increased from 250ms to 500ms
   const payload = {
     type: 'input',
     seq: state.inputSeq,
@@ -1827,8 +1902,8 @@ setInterval(() => {
   };
 
   const last = state.lastSentInput;
-  const sameDir = last && Math.abs(last.dir.x - dir.x) < 0.001 && Math.abs(last.dir.y - dir.y) < 0.001;
-  const sameAim = last && Math.abs(shortestAngleDiff(last.aim, payload.aim)) < 0.005;
+  const sameDir = last && Math.abs(last.dir.x - dir.x) < 0.01 && Math.abs(last.dir.y - dir.y) < 0.01; // Increased threshold from 0.001 to 0.01
+  const sameAim = last && Math.abs(shortestAngleDiff(last.aim, payload.aim)) < 0.02; // Increased threshold from 0.005 to 0.02
   const sameAction = !payload.action && !payload.powerup && last && !last.action && !last.powerup;
 
   if (forceHeartbeat || !sameDir || !sameAim || !sameAction) {
@@ -1853,7 +1928,7 @@ setInterval(() => {
 
   state.pendingAction = false;
   state.pendingPowerup = false;
-}, 50);
+}, 75); // Increased from 50ms to 75ms (13.3 updates/sec instead of 20)
 
 let lastFrameTimestamp = performance.now();
 

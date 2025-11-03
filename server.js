@@ -17,7 +17,7 @@ const DEFAULT_CONFIG = {
   deathPenaltyEnabled: true,
 };
 
-const TICK_RATE = 30;
+const TICK_RATE = 20; // Reduced from 30 to 20 for better network performance
 const FRAME_MS = 1000 / TICK_RATE;
 const PLAYER_RADIUS = 18;
 const COIN_RADIUS = 12;
@@ -844,10 +844,18 @@ function updateMatch(room, now) {
   if (room.state !== 'running') return;
   ensurePowerups(room, now);
   ensureRapidfires(room, now);
-  broadcast(room, {
-    type: 'state',
-    state: serializeGame(room),
-  });
+  
+  // Only broadcast if there are active players connected
+  const hasActivePlayers = Array.from(room.players.values()).some(
+    p => !p.disconnected && p.connection && p.connection.readyState === p.connection.OPEN
+  );
+  
+  if (hasActivePlayers) {
+    broadcast(room, {
+      type: 'state',
+      state: serializeGame(room),
+    });
+  }
 }
 
 function handleCoinCollisions(room, now) {
