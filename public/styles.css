@@ -750,6 +750,15 @@ button:disabled:hover {
   image-rendering: auto;
 }
 
+/* Pixelated mode for low graphics */
+#game-canvas.pixelated {
+  image-rendering: -moz-crisp-edges;
+  image-rendering: -webkit-crisp-edges;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  filter: contrast(1.1) saturate(0.9);
+}
+
 #game-canvas::before {
   content: '';
   position: absolute;
@@ -850,6 +859,19 @@ button:disabled:hover {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--muted);
+}
+
+.progress-bar .score-display {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #FDE047;
+  letter-spacing: 0.02em;
+  text-align: center;
+  padding: 4px 8px;
+  background: rgba(253, 224, 71, 0.1);
+  border: 1px solid rgba(253, 224, 71, 0.3);
+  border-radius: 4px;
+  margin-top: 2px;
 }
 
 .progress-bar .bar {
@@ -1099,6 +1121,28 @@ button:disabled:hover {
     0 0 40px #FF6B6B,
     0 4px 16px rgba(0, 0, 0, 0.4),
     inset 0 0 20px rgba(255, 215, 0, 0.2);
+}
+
+/* Simple animation for low graphics mode */
+#winner-announcement.winner-blast-simple {
+  animation: winner-simple-flash 2s ease-in-out;
+  color: #FFD700;
+  border-color: #FFD700;
+}
+
+@keyframes winner-simple-flash {
+  0%, 100% {
+    background: var(--surface);
+    transform: scale(1);
+  }
+  25%, 75% {
+    background: rgba(255, 215, 0, 0.1);
+    transform: scale(1.02);
+  }
+  50% {
+    background: rgba(255, 215, 0, 0.2);
+    transform: scale(1.05);
+  }
 }
 
 @keyframes winner-pulse {

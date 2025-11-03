@@ -12,7 +12,7 @@
       <div class="toggles">
         <button id="leave-game" class="toggle leave-btn" style="display: none;">Leave Game</button>
         <button id="mute-toggle" class="toggle">Mute</button>
-        <button id="graphics-toggle" class="toggle">Low Graphics: Off</button>
+        <button id="graphics-toggle" class="toggle">Pixelated Mode: Off</button>
         <div id="connection-indicator" class="connection-indicator" style="display: none;">
           <span class="connection-dot"></span>
           <span class="connection-text">Connection</span>
@@ -132,6 +132,9 @@
             <div class="label">Progress to victory</div>
             <div class="bar">
               <div id="progress-fill"></div>
+            </div>
+            <div class="score-display">
+              <span id="current-score">0</span> / <span id="target-score">50</span>
             </div>
           </div>
           <div class="game-tips">

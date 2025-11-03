@@ -33,6 +33,8 @@ const elements = {
   startButton: document.getElementById('start-game'),
   scoreList: document.getElementById('score-list'),
   progressFill: document.getElementById('progress-fill'),
+  currentScore: document.getElementById('current-score'),
+  targetScore: document.getElementById('target-score'),
   winnerAnnouncement: document.getElementById('winner-announcement'),
   resultsList: document.getElementById('results-list'),
   rematch: document.getElementById('rematch'),
@@ -59,9 +61,20 @@ const ctx = elements.canvas.getContext('2d', {
   willReadFrequently: false 
 });
 
-// Enable smooth rendering
+// Initialize with smooth rendering by default
 ctx.imageSmoothingEnabled = true;
 ctx.imageSmoothingQuality = 'high';
+
+// Set rendering quality and resolution based on graphics mode
+function updateRenderingQuality() {
+  if (state.lowGraphics) {
+    elements.canvas.classList.add('pixelated');
+  } else {
+    elements.canvas.classList.remove('pixelated');
+  }
+  // Resize canvas to apply new resolution scale
+  resizeCanvas();
+}
 
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = `${wsProtocol}//${location.host}`;
@@ -426,8 +439,12 @@ elements.muteToggle.addEventListener('click', () => {
 
 elements.graphicsToggle.addEventListener('click', () => {
   state.lowGraphics = !state.lowGraphics;
-  elements.graphicsToggle.textContent = `Low Graphics: ${state.lowGraphics ? 'On' : 'Off'}`;
-  showToast(state.lowGraphics ? 'Low graphics enabled' : 'Low graphics disabled', 'info', 2000);
+  elements.graphicsToggle.textContent = `Pixelated Mode: ${state.lowGraphics ? 'On' : 'Off'}`;
+  
+  // Apply rendering quality changes
+  updateRenderingQuality();
+  
+  showToast(state.lowGraphics ? 'Pixelated mode enabled - Lag should be reduced' : 'Pixelated mode disabled - Full graphics restored', 'info', 2000);
 });
 
 document.querySelectorAll('button[data-nav="splash"]').forEach((btn) => {
@@ -1154,6 +1171,10 @@ function showScreen(name) {
   // Start or stop tip rotation based on screen
   if (name === 'game') {
     startTipRotation();
+    // Initialize target score display
+    const target = state.config?.targetScore || 50;
+    elements.targetScore.textContent = target;
+    elements.currentScore.textContent = '0';
   } else {
     stopTipRotation();
   }
@@ -1667,6 +1688,10 @@ function renderHud() {
   const target = state.config?.targetScore || 50;
   const pct = Math.min(1, maxScore / target);
   elements.progressFill.style.width = `${pct * 100}%`;
+  
+  // Update score display in progress bar
+  elements.currentScore.textContent = maxScore;
+  elements.targetScore.textContent = target;
 }
 
 function renderResults(message) {
@@ -1753,6 +1778,15 @@ function showStatus(message, isError = false, timeout = 4000) {
 function triggerWinnerBlastAnimation() {
   const announcement = elements.winnerAnnouncement;
   if (!announcement) return;
+  
+  // Skip elaborate animations in low graphics mode
+  if (state.lowGraphics) {
+    announcement.classList.add('winner-blast-simple');
+    setTimeout(() => {
+      announcement.classList.remove('winner-blast-simple');
+    }, 2000);
+    return;
+  }
   
   // Add blast animation class
   announcement.classList.add('winner-blast-active');
@@ -1987,6 +2021,13 @@ function renderGameScene(game, timestamp) {
 }
 
 function drawBackdrop(width, height, timestamp) {
+  if (state.lowGraphics) {
+    // Simple solid background for low graphics mode
+    ctx.fillStyle = '#0A0E13';
+    ctx.fillRect(0, 0, width, height);
+    return;
+  }
+  
   // Draw background image if loaded, otherwise fallback to dark background
   if (backgroundImage.complete && backgroundImage.naturalWidth > 0) {
     ctx.drawImage(backgroundImage, 0, 0, width, height);
@@ -2725,6 +2766,17 @@ function drawPowerupEffects(timestamp) {
     const x = effect.x * scaleX;
     const y = effect.y * scaleY;
     
+    if (state.lowGraphics) {
+      // Simple circle flash for low graphics mode
+      const opacity = (1 - progress) * 0.8;
+      ctx.fillStyle = `rgba(168, 85, 247, ${opacity})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 50 * (1 - progress * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+      return true;
+    }
+    
+    // Full effect for normal graphics mode
     // Expanding ring effect
     const maxRadius = 200; // Match POWERUP_KILL_RADIUS from server
     const radius = maxRadius * progress;
@@ -2918,17 +2970,23 @@ function resizeCanvas() {
   elements.canvas.style.width = width + 'px';
   elements.canvas.style.height = height + 'px';
   
-  // Set actual size in memory (scaled for high-DPI)
-  const dpr = window.devicePixelRatio || 1;
+  // Set actual size in memory
+  // In low graphics mode, render at 50% resolution then scale up
+  const resolutionScale = state.lowGraphics ? 0.5 : 1;
+  const dpr = (window.devicePixelRatio || 1) * resolutionScale;
   elements.canvas.width = width * dpr;
   elements.canvas.height = height * dpr;
   
   // Scale the context to maintain proper coordinate system
   ctx.scale(dpr, dpr);
   
-  // Re-enable smooth rendering after resize
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
+  // Apply rendering quality settings
+  if (state.lowGraphics) {
+    ctx.imageSmoothingEnabled = false;
+  } else {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+  }
 }
 
 function updateFromDeepLink() {
