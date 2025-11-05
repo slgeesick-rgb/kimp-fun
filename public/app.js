@@ -134,7 +134,10 @@ const state = {
   screen: 'splash',
   ws: null,
   reconnecting: false,
+  reconnectAttempts: 0,
+  reconnectTimer: null,
   playerId: null,
+  playerName: null,
   isHost: false,
   roomId: null,
   hostKey: null,
@@ -143,6 +146,9 @@ const state = {
   lastLobbyState: null,
   gameState: null,
   resultsState: null,
+  resultsConfirmed: false,
+  lastConnectPayload: null,
+  intentionalDisconnect: false,
   config: null,
   lowGraphics: false,
   muted: false,
@@ -174,6 +180,8 @@ const state = {
   updateLatency: [],
   messagesSent: 0,
   messagesReceived: 0,
+  serverStateBuffer: [],
+  stateBufferDelayMs: 80,
 };
 
 // Game tips for players
@@ -257,6 +265,8 @@ function updateRoomTimer() {
 
 function handleGameTimeout() {
   hideRoomTimer();
+  state.resultsConfirmed = false;
+  clearServerStateBuffer();
   
   // Notify server about timeout (only host can do this)
   if (state.isHost && state.ws) {
@@ -348,6 +358,11 @@ function updateConnectionQuality() {
 // Update connection quality every 2 seconds
 setInterval(updateConnectionQuality, 2000);
 
+const MAX_RECONNECT_ATTEMPTS = 6;
+const BASE_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 15000;
+const MAX_BUFFERED_STATES = 8;
+
 // Session persistence functions
 function saveSession() {
   if (state.roomId && state.playerId) {
@@ -359,6 +374,7 @@ function saveSession() {
       passcode: state.passcode,
       joinUrl: state.joinUrl,
       spaceship: state.selectedSpaceship,
+      name: state.playerName || state.lastConnectPayload?.name || null,
       timestamp: Date.now()
     };
     sessionStorage.setItem('kimpfun_session', JSON.stringify(session));
@@ -744,6 +760,10 @@ elements.startButton.addEventListener('click', () => {
 
 elements.rematch.addEventListener('click', () => {
   if (!state.isHost || !state.ws) return;
+  if (!state.resultsConfirmed) {
+    showToast('Finishing timeout… try again in a moment.', 'info', 2000);
+    return;
+  }
   sendMessage({ type: 'rematch' });
 });
 
@@ -754,6 +774,8 @@ elements.leaveGame.addEventListener('click', () => {
 });
 
 function leaveGame() {
+  state.intentionalDisconnect = true;
+  cancelReconnect();
   // Close WebSocket connection
   if (state.ws) {
     state.ws.close();
@@ -773,6 +795,7 @@ function leaveGame() {
   state.lastLobbyState = null;
   state.gameState = null;
   state.resultsState = null;
+  state.resultsConfirmed = false;
   state.localPlayer = null;
   state.thrustInput = 0;
   state.joystickDir = { x: 0, y: 0 };
@@ -790,6 +813,8 @@ function leaveGame() {
   // Go to splash screen
   showScreen('splash');
   showToast('Left the game', 'info', 2000);
+  state.intentionalDisconnect = false;
+  cancelReconnect();
 }
 
 elements.actionButton.addEventListener('touchstart', (e) => {
@@ -1218,16 +1243,147 @@ function parseRoomId(input) {
   return null;
 }
 
+function cancelReconnect() {
+  state.reconnecting = false;
+  state.reconnectAttempts = 0;
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+}
+
+function buildReconnectPayload() {
+  const session = loadSession();
+  const lastPayload = state.lastConnectPayload;
+
+  const roomId = session?.roomId || lastPayload?.roomId;
+  if (!roomId) return null;
+
+  let name = session?.name || state.playerName || lastPayload?.name || elements.createName?.value || elements.joinName?.value || '';
+  if (!name && session?.joinUrl) {
+    try {
+      name = new URL(session.joinUrl).searchParams.get('name') || '';
+    } catch (err) {
+      name = '';
+    }
+  }
+  name = (name || 'Player').slice(0, 16);
+
+  const passcode = session?.passcode ?? lastPayload?.passcode ?? null;
+  const hostKey = session?.isHost ? (session?.hostKey || lastPayload?.hostKey) : lastPayload?.hostKey;
+  const spaceship = session?.spaceship || lastPayload?.spaceship || state.selectedSpaceship;
+
+  return {
+    roomId,
+    name,
+    hostKey,
+    passcode,
+    spaceship,
+  };
+}
+
+function scheduleReconnect(reason) {
+  if (state.intentionalDisconnect) return;
+  if (state.reconnectTimer) return;
+
+  if (state.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    showToast('Connection lost. Please reload to continue.', 'error', 4000);
+    clearSession();
+    elements.leaveGame.style.display = 'none';
+    state.reconnecting = false;
+    return;
+  }
+
+  const payload = buildReconnectPayload();
+  if (!payload) {
+    showToast('Connection lost. Please rejoin the room.', 'error', 4000);
+    elements.leaveGame.style.display = 'none';
+    state.reconnecting = false;
+    return;
+  }
+
+  const delay = Math.min(
+    MAX_RECONNECT_DELAY_MS,
+    BASE_RECONNECT_DELAY_MS * Math.pow(2, state.reconnectAttempts)
+  );
+
+  state.reconnecting = true;
+  const attemptLabel = state.reconnectAttempts ? `Reconnecting… attempt ${state.reconnectAttempts + 1}` : 'Connection lost. Reconnecting…';
+  showToast(attemptLabel, 'error', 2500);
+
+  state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = null;
+    state.reconnectAttempts += 1;
+    connectSocket(payload);
+  }, delay);
+}
+
+function clearServerStateBuffer() {
+  state.serverStateBuffer.length = 0;
+}
+
+function processServerStateBuffer(force = false) {
+  if (!state.serverStateBuffer.length) return;
+  const now = performance.now();
+  let applied = false;
+
+  while (state.serverStateBuffer.length) {
+    const next = state.serverStateBuffer[0];
+    const age = now - next.receivedAt;
+    if (!force && age < state.stateBufferDelayMs && state.serverStateBuffer.length < MAX_BUFFERED_STATES) {
+      break;
+    }
+    state.serverStateBuffer.shift();
+    updateFromSerializedState(next.state);
+    applied = true;
+  }
+
+  if (applied && state.screen === 'game') {
+    renderHud();
+  }
+}
+
+function bufferServerState(serialized) {
+  if (!serialized) return;
+  state.serverStateBuffer.push({ state: serialized, receivedAt: performance.now() });
+  if (state.serverStateBuffer.length > MAX_BUFFERED_STATES * 2) {
+    state.serverStateBuffer.splice(0, state.serverStateBuffer.length - MAX_BUFFERED_STATES);
+  }
+
+  if (!state.gameState || state.screen !== 'game') {
+    processServerStateBuffer(true);
+  } else {
+    processServerStateBuffer();
+  }
+}
+
 function connectSocket({ roomId, name, hostKey, passcode, spaceship }) {
   if (!roomId || !name) {
     showStatus('Missing room or name', true);
     return;
   }
 
+  state.intentionalDisconnect = false;
   state.lastSentInput = null;
   state.lastInputSentAt = 0;
+  state.playerName = name;
+  state.roomId = roomId;
+  if (typeof passcode !== 'undefined') {
+    state.passcode = passcode;
+  }
+  if (hostKey) {
+    state.hostKey = hostKey;
+  }
+  state.lastConnectPayload = {
+    roomId,
+    name,
+    hostKey,
+    passcode,
+    spaceship: spaceship || state.selectedSpaceship,
+  };
 
   if (state.ws) {
+    state.intentionalDisconnect = false;
     state.ws.close(1000, 'Reconnecting');
     state.ws = null;
   }
@@ -1236,6 +1392,7 @@ function connectSocket({ roomId, name, hostKey, passcode, spaceship }) {
   state.ws = socket;
 
   socket.addEventListener('open', () => {
+    cancelReconnect();
     sendMessage({
       type: 'join',
       roomId,
@@ -1255,18 +1412,24 @@ function connectSocket({ roomId, name, hostKey, passcode, spaceship }) {
     }
   });
 
-  socket.addEventListener('close', () => {
+  socket.addEventListener('close', (event) => {
     if (state.ws === socket) {
       state.ws = null;
-      elements.leaveGame.style.display = 'none';
-      clearSession();
-      showStatus('Connection closed', true);
+      if (state.intentionalDisconnect) {
+        cancelReconnect();
+        elements.leaveGame.style.display = 'none';
+        clearSession();
+        state.intentionalDisconnect = false;
+        showStatus('Disconnected', true);
+      } else {
+        scheduleReconnect('close');
+      }
     }
   });
 
   socket.addEventListener('error', () => {
     if (state.ws === socket) {
-      showStatus('Network error', true);
+      scheduleReconnect('error');
     }
   });
 }
@@ -1296,10 +1459,15 @@ function handleServerMessage(message) {
       state.playerId = message.playerId;
       state.isHost = message.isHost;
       state.config = message.state?.config || state.config;
+      clearServerStateBuffer();
       if (message.state?.id) {
         const selfPlayer = message.state.players?.find((p) => p.id === message.playerId);
         const displayName = selfPlayer?.name || elements.createName.value || elements.joinName.value;
         state.joinUrl = buildJoinUrl(message.state.id, displayName);
+        state.playerName = displayName;
+        if (selfPlayer?.spaceship) {
+          state.selectedSpaceship = selfPlayer.spaceship;
+        }
       }
       updateFromSerializedState(message.state);
       handleStateTransition(message.state);
@@ -1324,8 +1492,10 @@ function handleServerMessage(message) {
       // If in game/results, just update state silently without switching screens
       break;
     case 'match-start':
-      updateFromSerializedState(message.state);
+      clearServerStateBuffer();
+      bufferServerState(message.state);
       state.resultsState = null;
+      state.resultsConfirmed = false;
       showScreen('game');
       startRoomTimer(); // Start countdown when game starts
       renderHud();
@@ -1337,13 +1507,14 @@ function handleServerMessage(message) {
       }
       break;
     case 'state':
-      updateFromSerializedState(message.state);
-      renderHud();
+      bufferServerState(message.state);
       break;
     case 'match-end':
+      clearServerStateBuffer();
       updateFromSerializedState(message.state);
       state.resultsState = message.state;
       state.resultsState.winnerId = message.winnerId;
+      state.resultsConfirmed = true;
       renderResults(message);
       showScreen('results');
       break;
@@ -1601,6 +1772,9 @@ function updateFromSerializedState(serialized) {
   if (serialized.state === 'results') {
     state.resultsState = serialized;
     state.localPlayer = null;
+    state.resultsConfirmed = true;
+  } else if (serialized.state === 'running') {
+    state.resultsConfirmed = false;
   }
   if (serialized.targetScore) {
     state.config = { ...state.config, targetScore: serialized.targetScore };
@@ -1970,6 +2144,8 @@ function draw(timestamp) {
   const deltaMs = timestamp - lastFrameTimestamp;
   lastFrameTimestamp = timestamp;
   requestAnimationFrame(draw);
+
+  processServerStateBuffer();
 
   if (!state.gameState) {
     clearCanvas();
@@ -3029,9 +3205,14 @@ function tryRestoreSession() {
   elements.leaveGame.style.display = 'block';
   
   // Get display name from session or use a default
-  const displayName = session.joinUrl ? 
-    new URLSearchParams(new URL(session.joinUrl).search).get('name') || 'Player' : 
-    'Player';
+  let displayName = session.name || 'Player';
+  if (!session.name && session.joinUrl) {
+    try {
+      displayName = new URLSearchParams(new URL(session.joinUrl).search).get('name') || 'Player';
+    } catch (err) {
+      displayName = 'Player';
+    }
+  }
   
   // Reconnect
   showStatus('Reconnecting...');

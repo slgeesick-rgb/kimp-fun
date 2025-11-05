@@ -47,7 +47,7 @@ const BULLET_LIFETIME_MS = 2000; // Bullets last 2 seconds
 const INPUT_RATE_LIMIT_MS = 16;
 const LOBBY_HEARTBEAT_MS = 1000;
 const ROOM_SWEEP_MS = 60000;
-const RECONNECT_GRACE_MS = 10000; // 10 seconds to reconnect
+const RECONNECT_GRACE_MS = 30000; // 30 seconds to reconnect
 const PROFANITY_LIST = ['ass', 'dick', 'shit', 'fuck', 'bitch'];
 
 const rooms = new Map();
@@ -637,10 +637,8 @@ function startMatch(room, isRematch = false) {
   room.lastRapidfireSpawn = Date.now();
   room.lastActive = Date.now();
   
-  // Set game start time for countdown timer (only on first match start)
-  if (!room.gameStartedAt) {
-    room.gameStartedAt = Date.now();
-  }
+  // Always reset the game start time so the in-game timer starts fresh on rematch
+  room.gameStartedAt = Date.now();
 
   const seeds = crypto.randomBytes(8).readUInt32BE(0);
   room.randomSeed = seeds;
