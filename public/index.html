@@ -180,6 +180,28 @@
           </div>
         </div>
         <div class="canvas-wrapper">
+          <button id="fullscreen-toggle" class="fullscreen-btn" aria-label="Toggle fullscreen">
+            <svg class="maximize-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+            </svg>
+            <svg class="minimize-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;">
+              <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+            </svg>
+          </button>
+          <div id="fullscreen-progress" class="fullscreen-progress" style="display:none;">
+            <div class="progress-bar">
+
+              <div class="bar">
+                <div id="fullscreen-progress-fill"></div>
+              </div>
+              <div class="score-display">
+                <span id="fullscreen-current-score">0</span> / <span id="fullscreen-target-score">50</span>
+              </div>
+            </div>
+          </div>
+          <div id="fullscreen-scoreboard" class="fullscreen-scoreboard" style="display:none;">
+            <ul id="fullscreen-score-list"></ul>
+          </div>
           <canvas id="game-canvas" width="960" height="540"></canvas>
           <div id="effect-layer" aria-hidden="true"></div>
         </div>

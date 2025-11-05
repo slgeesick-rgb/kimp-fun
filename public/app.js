@@ -53,6 +53,14 @@ const elements = {
   roomTimer: document.getElementById('room-timer'),
   timerDisplay: document.getElementById('timer-display'),
   connectionIndicator: document.getElementById('connection-indicator'),
+  fullscreenToggle: document.getElementById('fullscreen-toggle'),
+  fullscreenProgress: document.getElementById('fullscreen-progress'),
+  fullscreenProgressFill: document.getElementById('fullscreen-progress-fill'),
+  fullscreenCurrentScore: document.getElementById('fullscreen-current-score'),
+  fullscreenTargetScore: document.getElementById('fullscreen-target-score'),
+  fullscreenScoreboard: document.getElementById('fullscreen-scoreboard'),
+  fullscreenScoreList: document.getElementById('fullscreen-score-list'),
+  canvasWrapper: document.querySelector('.canvas-wrapper'),
 };
 
 const ctx = elements.canvas.getContext('2d', { 
@@ -258,7 +266,7 @@ function updateRoomTimer() {
 
 function handleGameTimeout() {
   hideRoomTimer();
-  state.resultsConfirmed = false;
+  state.resultsConfirmed = true; // Set to true so rematch button works
   
   // Notify server about timeout (only host can do this)
   if (state.isHost && state.ws) {
@@ -745,11 +753,21 @@ elements.startButton.addEventListener('click', () => {
 });
 
 elements.rematch.addEventListener('click', () => {
-  if (!state.isHost || !state.ws) return;
+  if (!state.ws) {
+    showToast('Not connected to server', 'error', 2000);
+    return;
+  }
+  
+  if (!state.isHost) {
+    showToast('Only the host can start a rematch', 'info', 3000);
+    return;
+  }
+  
   if (!state.resultsConfirmed) {
     showToast('Finishing timeout… try again in a moment.', 'info', 2000);
     return;
   }
+  
   sendMessage({ type: 'rematch' });
 });
 
@@ -790,8 +808,9 @@ function leaveGame() {
   state.lastInputSentAt = 0;
   
   clearEffectLayer();
-
-  // Hide leave button
+  
+  // Hide timer and leave button
+  hideRoomTimer();
   elements.leaveGame.style.display = 'none';
   
   // Go to splash screen
@@ -1174,6 +1193,11 @@ function showScreen(name) {
   if (elements.effectLayer && name !== 'game') {
     clearEffectLayer();
   }
+  
+  // Hide timer when not in game screen
+  if (name !== 'game') {
+    hideRoomTimer();
+  }
 
   // Start or stop tip rotation based on screen
   if (name === 'game') {
@@ -1353,6 +1377,7 @@ function handleServerMessage(message) {
       state.resultsState = message.state;
       state.resultsState.winnerId = message.winnerId;
       state.resultsConfirmed = true;
+      hideRoomTimer(); // Hide timer when match ends
       renderResults(message);
       showScreen('results');
       break;
@@ -1748,7 +1773,16 @@ function renderResults(message) {
       li.appendChild(score);
       elements.resultsList.appendChild(li);
     });
+  
+  // Update rematch button based on host status
   elements.rematch.disabled = !state.isHost;
+  if (state.isHost) {
+    elements.rematch.textContent = 'Play Again';
+    elements.rematch.title = '';
+  } else {
+    elements.rematch.textContent = 'Play Again (Host Only)';
+    elements.rematch.title = 'Only the host can start a rematch';
+  }
 }
 
 function showToast(message, type = 'info', duration = 4000) {
@@ -2964,8 +2998,21 @@ window.addEventListener('resize', () => resizeCanvas(), { passive: true });
 resizeCanvas();
 
 function resizeCanvas() {
-  const containerWidth = Math.min(window.innerWidth - 32, 960);
-  const containerHeight = Math.min(window.innerHeight - 220, 540);
+  const isInFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement || 
+                            document.mozFullScreenElement || document.msFullscreenElement);
+  
+  let containerWidth, containerHeight;
+  
+  if (isInFullscreen) {
+    // Use full viewport in fullscreen mode
+    containerWidth = window.innerWidth;
+    containerHeight = window.innerHeight;
+  } else {
+    // Normal mode - use constrained dimensions
+    containerWidth = Math.min(window.innerWidth - 32, 960);
+    containerHeight = Math.min(window.innerHeight - 220, 540);
+  }
+  
   const ratio = 1600 / 900;
   let width = containerWidth;
   let height = width / ratio;
@@ -2973,8 +3020,14 @@ function resizeCanvas() {
     height = containerHeight;
     width = height * ratio;
   }
-  width = Math.max(640, Math.floor(width));
-  height = Math.max(360, Math.floor(height));
+  
+  if (!isInFullscreen) {
+    width = Math.max(640, Math.floor(width));
+    height = Math.max(360, Math.floor(height));
+  } else {
+    width = Math.floor(width);
+    height = Math.floor(height);
+  }
   
   // Set display size (CSS pixels)
   elements.canvas.style.width = width + 'px';
@@ -3067,9 +3120,120 @@ function resizeObserverFallback() {
 
 window.addEventListener('orientationchange', resizeObserverFallback);
 
+// Fullscreen functionality
+let isFullscreen = false;
+
+function updateFullscreenButton() {
+  const maximizeIcon = elements.fullscreenToggle.querySelector('.maximize-icon');
+  const minimizeIcon = elements.fullscreenToggle.querySelector('.minimize-icon');
+  
+  if (isFullscreen) {
+    maximizeIcon.style.display = 'none';
+    minimizeIcon.style.display = 'block';
+  } else {
+    maximizeIcon.style.display = 'block';
+    minimizeIcon.style.display = 'none';
+  }
+}
+
+function updateFullscreenProgress() {
+  if (isFullscreen && state.gameState) {
+    elements.fullscreenProgress.style.display = 'block';
+    elements.fullscreenScoreboard.style.display = 'block';
+    
+    // Update progress bar and scores to match the main HUD
+    const players = state.gameState.players || [];
+    const sorted = players.slice().sort((a, b) => b.score - a.score);
+    const maxScore = sorted.length ? sorted[0].score : 0;
+    const targetScore = state.config?.targetScore || 50;
+    const progress = Math.min((maxScore / targetScore) * 100, 100);
+    
+    elements.fullscreenProgressFill.style.width = progress + '%';
+    elements.fullscreenCurrentScore.textContent = maxScore;
+    elements.fullscreenTargetScore.textContent = targetScore;
+    
+    // Update scoreboard with all players except the current player
+    elements.fullscreenScoreList.innerHTML = '';
+    sorted.forEach((player) => {
+      // Skip the current player since their score is shown in the progress bar on the right
+      if (player.id === state.playerId) return;
+      
+      const li = document.createElement('li');
+      
+      // Add spaceship icon
+      if (player.spaceship) {
+        const spaceshipIcon = document.createElement('img');
+        spaceshipIcon.src = `/assets/players/player${player.spaceship}.webp`;
+        spaceshipIcon.className = 'player-spaceship-icon';
+        spaceshipIcon.alt = `Spaceship ${player.spaceship}`;
+        li.appendChild(spaceshipIcon);
+      }
+      
+      // Add score
+      const score = document.createElement('span');
+      score.className = 'score-value';
+      score.textContent = `${player.score} pts`;
+      li.appendChild(score);
+      
+      elements.fullscreenScoreList.appendChild(li);
+    });
+  } else {
+    elements.fullscreenProgress.style.display = 'none';
+    elements.fullscreenScoreboard.style.display = 'none';
+  }
+}
+
+async function toggleFullscreen() {
+  try {
+    if (!document.fullscreenElement && !document.webkitFullscreenElement && 
+        !document.mozFullScreenElement && !document.msFullscreenElement) {
+      // Enter fullscreen
+      const wrapper = elements.canvasWrapper;
+      if (wrapper.requestFullscreen) {
+        await wrapper.requestFullscreen();
+      } else if (wrapper.webkitRequestFullscreen) {
+        await wrapper.webkitRequestFullscreen();
+      } else if (wrapper.mozRequestFullScreen) {
+        await wrapper.mozRequestFullScreen();
+      } else if (wrapper.msRequestFullscreen) {
+        await wrapper.msRequestFullscreen();
+      }
+    } else {
+      // Exit fullscreen
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        await document.webkitExitFullscreen();
+      } else if (document.mozCancelFullScreen) {
+        await document.mozCancelFullScreen();
+      } else if (document.msExitFullscreen) {
+        await document.msExitFullscreen();
+      }
+    }
+  } catch (error) {
+    console.error('Fullscreen toggle error:', error);
+  }
+}
+
+function handleFullscreenChange() {
+  isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement || 
+                    document.mozFullScreenElement || document.msFullscreenElement);
+  updateFullscreenButton();
+  updateFullscreenProgress();
+  resizeCanvas();
+}
+
+// Set up fullscreen event listeners
+elements.fullscreenToggle.addEventListener('click', toggleFullscreen);
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
 function renderLoopTicker() {
   if (state.gameState) {
     renderHud();
+    updateFullscreenProgress();
   }
   requestAnimationFrame(renderLoopTicker);
 }
