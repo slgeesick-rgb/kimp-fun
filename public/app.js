@@ -1694,7 +1694,7 @@ function renderLobby() {
   elements.roomId.textContent = `Room: ${id}`;
   const passcodeLabel = config.passcodeEnabled ? 'Required' : 'Open';
   const penaltyLabel = config.deathPenaltyEnabled ? 'On' : 'Off';
-  elements.roomConfig.textContent = `Target ${config.targetScore} pts · Max ${config.maxPlayers} players · Passcode ${passcodeLabel} · Death penalty ${penaltyLabel}`;
+  elements.roomConfig.innerHTML = `Target <span class="target-pts">${config.targetScore} points</span> · Max ${config.maxPlayers} players · Passcode ${passcodeLabel} · Death penalty ${penaltyLabel}`;
   elements.playerList.innerHTML = '';
   players
     .slice()
