@@ -1493,10 +1493,11 @@ function handleServerMessage(message) {
       break;
     case 'match-start':
       clearServerStateBuffer();
-      bufferServerState(message.state);
       state.resultsState = null;
       state.resultsConfirmed = false;
+      state.gameState = null; // Clear previous game state
       showScreen('game');
+      bufferServerState(message.state);
       startRoomTimer(); // Start countdown when game starts
       renderHud();
       break;

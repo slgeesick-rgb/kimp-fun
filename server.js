@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { WebSocketServer } from 'ws';
+import IORedis from 'ioredis';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,6 +53,86 @@ const PROFANITY_LIST = ['ass', 'dick', 'shit', 'fuck', 'bitch'];
 
 const rooms = new Map();
 const disconnectedPlayers = new Map(); // playerId -> { player, roomId, disconnectTime }
+
+// Redis integration (optional): when REDIS_URL provided, we persist room metadata
+// and relay broadcast messages across instances so multiple app instances
+// can serve clients for the same rooms.
+const REDIS_URL = process.env.REDIS_URL || null;
+let redisPub = null;
+let redisSub = null;
+const INSTANCE_ID = crypto.randomBytes(6).toString('hex');
+
+if (REDIS_URL) {
+  redisPub = new IORedis(REDIS_URL);
+  redisSub = new IORedis(REDIS_URL);
+
+  // Subscribe to per-room channels via pattern
+  redisSub.psubscribe('kimp:room:*', (err, count) => {
+    if (err) console.warn('redis psubscribe error', err);
+  });
+
+  redisSub.on('pmessage', (pattern, channel, message) => {
+    try {
+      const parsed = JSON.parse(message);
+      const match = channel.match(/^kimp:room:(.+)$/);
+      if (!match) return;
+      const roomId = match[1];
+
+      if (parsed && parsed.type === 'relay') {
+        // Relay a broadcast message to local players in this room
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const payload = JSON.stringify(parsed.message);
+        for (const p of room.players.values()) {
+          const ws = p.connection;
+          if (!ws || ws.readyState !== ws.OPEN) continue;
+          try { ws.send(payload); } catch (e) { /* ignore */ }
+        }
+      } else if (parsed && parsed.type === 'persist') {
+        // Update or create a lightweight cached room metadata (no connections)
+        const data = parsed.data;
+        if (!rooms.has(roomId)) {
+          const shim = {
+            id: data.id,
+            hostKey: data.hostKey,
+            hostName: data.hostName,
+            passcode: data.passcode,
+            config: data.config,
+            createdAt: data.createdAt,
+            state: data.state,
+            matchId: data.matchId,
+            lastActive: data.lastActive,
+            gameStartedAt: data.gameStartedAt,
+            players: new Map(),
+            coins: new Map(),
+            enemies: new Map(),
+            powerups: new Map(),
+            rapidfires: new Map(),
+            bullets: new Map(),
+            reservedNames: new Set(data.reservedNames || []),
+            lastLobbyBroadcast: data.lastLobbyBroadcast || Date.now(),
+          };
+          rooms.set(roomId, shim);
+        } else {
+          const r = rooms.get(roomId);
+          r.hostKey = data.hostKey;
+          r.hostName = data.hostName;
+          r.passcode = data.passcode;
+          r.config = data.config;
+          r.state = data.state;
+          r.matchId = data.matchId;
+          r.lastActive = data.lastActive;
+          r.gameStartedAt = data.gameStartedAt;
+        }
+      } else if (parsed && parsed.type === 'delete') {
+        // Remove cached room if exists
+        if (rooms.has(roomId)) rooms.delete(roomId);
+      }
+    } catch (err) {
+      console.warn('Invalid redis message', err);
+    }
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -180,7 +261,30 @@ async function handleRoomInfo(req, res) {
     return;
   }
 
-  const room = rooms.get(roomId);
+  let room = rooms.get(roomId);
+  if (!room && redisPub) {
+    try {
+      const cached = await redisPub.get(`kimp:room:${roomId}`);
+      if (cached) {
+        const data = JSON.parse(cached);
+        // Build a lightweight room response from persisted metadata
+        room = {
+          id: data.id,
+          hostKey: data.hostKey,
+          hostName: data.hostName,
+          passcode: data.passcode,
+          config: data.config,
+          createdAt: data.createdAt,
+          state: data.state,
+          matchId: data.matchId,
+          lastActive: data.lastActive,
+        };
+      }
+    } catch (err) {
+      console.warn('redis get error', err);
+    }
+  }
+
   if (!room) {
     res.statusCode = 404;
     res.setHeader('Content-Type', 'application/json; charset=UTF-8');
@@ -283,6 +387,8 @@ async function handleCreateRoom(req, res) {
     lastLobbyBroadcast: Date.now(),
   };
   rooms.set(roomId, room);
+  // Persist room metadata for other instances and for REST lookups
+  persistRoom(room);
 
   const origin = req.headers.origin || `http://${req.headers.host}`;
   const baseUrl = new URL(origin);
@@ -430,6 +536,7 @@ function handleJoin(socket, payload) {
     }
     
     room.lastActive = Date.now();
+    persistRoom(room);
     return;
   }
 
@@ -539,6 +646,8 @@ function handleJoin(socket, payload) {
       type: 'lobby-update',
       state: serializeLobby(room),
     });
+    // Persist changes so other instances and REST queries see updated room
+    persistRoom(room);
   }
 }
 
@@ -621,6 +730,8 @@ function handleTimeout(socket, payload) {
     timedOut: true,
     state: serializeResults(room),
   });
+  // Persist timeout/results state
+  persistRoom(room);
 }
 
 function startMatch(room, isRematch = false) {
@@ -669,6 +780,8 @@ function startMatch(room, isRematch = false) {
     type: 'match-start',
     state: serializeGame(room),
   });
+  // Persist room state metadata after match start
+  persistRoom(room);
 }
 
 function ensureCoins(room) {
@@ -1183,6 +1296,8 @@ function checkWin(room, player) {
       winnerId: player.id,
       state: serializeResults(room),
     });
+    // Persist results state
+    persistRoom(room);
     return true;
   }
   return false;
@@ -1205,6 +1320,51 @@ function broadcast(room, message) {
     } catch (err) {
       console.warn('Broadcast error', err);
     }
+  }
+  // Publish relay to other instances so they can forward the message
+  if (redisPub) {
+    try {
+      redisPub.publish(`kimp:room:${room.id}`, JSON.stringify({ type: 'relay', message }));
+    } catch (err) {
+      console.warn('redis publish relay error', err);
+    }
+  }
+}
+
+function persistRoom(room) {
+  if (!redisPub) return;
+  try {
+    const serialized = {
+      id: room.id,
+      hostKey: room.hostKey,
+      hostName: room.hostName,
+      passcode: room.passcode,
+      config: room.config,
+      createdAt: room.createdAt,
+      state: room.state,
+      matchId: room.matchId,
+      lastActive: room.lastActive,
+      gameStartedAt: room.gameStartedAt,
+      reservedNames: Array.from(room.reservedNames || []),
+      lastLobbyBroadcast: room.lastLobbyBroadcast || Date.now(),
+    };
+    const key = `kimp:room:${room.id}`;
+    const ttl = Math.max(60, (room.config?.roomTimeoutMinutes || DEFAULT_CONFIG.roomTimeoutMinutes) * 60);
+    redisPub.set(key, JSON.stringify(serialized), 'EX', ttl).catch((e) => console.warn('redis set error', e));
+    // Also publish a persist event so other instances can update their cache
+    redisPub.publish(`kimp:room:${room.id}`, JSON.stringify({ type: 'persist', data: serialized })).catch(() => {});
+  } catch (err) {
+    console.warn('persistRoom error', err);
+  }
+}
+
+function deleteRoomFromRedis(roomId) {
+  if (!redisPub) return;
+  try {
+    redisPub.del(`kimp:room:${roomId}`).catch(() => {});
+    redisPub.publish(`kimp:room:${roomId}`, JSON.stringify({ type: 'delete' })).catch(() => {});
+  } catch (err) {
+    console.warn('deleteRoomFromRedis error', err);
   }
 }
 
@@ -1333,6 +1493,8 @@ function handleDisconnect(socket) {
           
           if (currentRoom.players.size === 0) {
             rooms.delete(currentRoom.id);
+            // Remove persisted room metadata when empty
+            deleteRoomFromRedis(currentRoom.id);
           }
         }
       }
@@ -1347,6 +1509,8 @@ function promoteNewHost(room) {
     if (candidate.disconnected) continue; // Skip disconnected players
     candidate.isHost = true;
     broadcast(room, { type: 'host-change', playerId: candidate.id });
+    // Persist host change
+    persistRoom(room);
     break;
   }
 }
@@ -1379,6 +1543,9 @@ function sweepRooms() {
           player.connection.close();
         }
       });
+
+      // Remove persisted room data
+      deleteRoomFromRedis(id);
       
       rooms.delete(id);
     }
