@@ -405,6 +405,12 @@ function clearSession() {
   sessionStorage.removeItem('kimpfun_session');
 }
 
+// Capitalize first letter of player name
+function capitalizeFirstLetter(str) {
+  if (!str) return str;
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
 const audio = {
   ctx: null,
   muted: false,
@@ -506,6 +512,31 @@ elements.createPasscodeEnabled.addEventListener('change', (event) => {
   elements.createPasscode.disabled = !enabled;
   if (!enabled) {
     elements.createPasscode.value = '';
+  }
+});
+
+// Auto-capitalize first letter of player names as they type
+elements.createName.addEventListener('input', (event) => {
+  const input = event.target;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const capitalized = capitalizeFirstLetter(input.value);
+  if (input.value !== capitalized) {
+    input.value = capitalized;
+    // Restore cursor position
+    input.setSelectionRange(start, end);
+  }
+});
+
+elements.joinName.addEventListener('input', (event) => {
+  const input = event.target;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const capitalized = capitalizeFirstLetter(input.value);
+  if (input.value !== capitalized) {
+    input.value = capitalized;
+    // Restore cursor position
+    input.setSelectionRange(start, end);
   }
 });
 
@@ -673,8 +704,11 @@ elements.createForm.addEventListener('submit', async (event) => {
     return;
   }
   
+  // Capitalize the first letter of the name
+  const playerName = capitalizeFirstLetter(elements.createName.value.trim());
+  
   const payload = {
-    name: elements.createName.value,
+    name: playerName,
     targetScore: Number(elements.createTarget.value),
     maxPlayers: Number(elements.createMax.value),
     passcode: elements.createPasscode.value,
@@ -697,12 +731,12 @@ elements.createForm.addEventListener('submit', async (event) => {
     state.roomId = data.roomId;
     state.hostKey = data.hostKey;
     state.config = data.config;
-    state.joinUrl = data.joinUrl || buildJoinUrl(data.roomId, elements.createName.value);
+    state.joinUrl = data.joinUrl || buildJoinUrl(data.roomId, playerName);
     state.passcode = payload.passcode;
     showStatus('Room created. Connecting…');
     connectSocket({
       roomId: state.roomId,
-      name: elements.createName.value,
+      name: playerName,
       hostKey: state.hostKey,
       passcode: payload.passcode,
       spaceship: state.selectedSpaceship,
@@ -727,14 +761,17 @@ elements.joinForm.addEventListener('submit', (event) => {
     return;
   }
   
+  // Capitalize the first letter of the name
+  const playerName = capitalizeFirstLetter(elements.joinName.value.trim());
+  
   state.roomId = roomId;
   state.hostKey = null;
-  state.joinUrl = buildJoinUrl(roomId, elements.joinName.value);
+  state.joinUrl = buildJoinUrl(roomId, playerName);
   state.passcode = elements.joinPasscode.value || null;
   showStatus('Joining room…');
   connectSocket({
     roomId,
-    name: elements.joinName.value,
+    name: playerName,
     passcode: state.passcode,
     spaceship: state.selectedSpaceship,
   });
