@@ -358,7 +358,6 @@ main {
   font-weight: 800;
   letter-spacing: -0.02em;
   text-transform: uppercase;
-  border-bottom: 3px solid var(--accent);
   padding-bottom: 12px;
   margin-bottom: 8px;
 }
@@ -370,7 +369,6 @@ main {
   font-weight: 700;
   letter-spacing: -0.01em;
   text-transform: uppercase;
-  border-bottom: 2px solid var(--accent);
   padding-bottom: 10px;
   margin-bottom: 8px;
 }
@@ -471,7 +469,7 @@ button {
 input[type="text"],
 input[type="number"] {
   padding: 12px 14px;
-  border-radius: 0;
+  border-radius: 0.5rem;
   border: 2px solid var(--border);
   border-left: 4px solid var(--border-bright);
   background: var(--black);
@@ -496,7 +494,7 @@ input[type="text"]::placeholder {
 
 button {
   padding: 12px 24px;
-  border-radius: 0;
+  border-radius: 0.5rem;
   border: 2px solid var(--primary);
   background: var(--primary);
   color: var(--white);
@@ -597,6 +595,34 @@ button:disabled:hover {
   width: 20px;
   height: 20px;
   cursor: pointer;
+  border-radius: 9999px;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background: var(--black);
+  border: 2px solid var(--border);
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.switch input[type="checkbox"]:checked {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.switch input[type="checkbox"]:checked::after {
+  content: '✓';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.switch input[type="checkbox"]:hover {
+  border-color: var(--accent);
 }
 
 .lobby-controls {
@@ -673,6 +699,7 @@ button:disabled:hover {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
+  border-radius: 10px;
   background: var(--black);
   border-left: 2px solid var(--border-bright);
   border-right: 1px solid var(--border);
@@ -1029,7 +1056,7 @@ button:disabled:hover {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
-  border-bottom: 1px solid var(--border);
+
   padding-bottom: 4px;
 }
 
@@ -1037,6 +1064,7 @@ button:disabled:hover {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  border-radius: 10px;
   background: var(--surface);
   border: 2px solid var(--border-bright);
   padding: 8px 12px;
@@ -1114,6 +1142,7 @@ button:disabled:hover {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  border-radius: 10px;
   background: var(--surface);
   border: 2px solid var(--border-bright);
   padding: 8px 12px;
@@ -1141,6 +1170,7 @@ button:disabled:hover {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  border-radius: 10px;
   background: var(--surface);
   border: 2px solid var(--border-bright);
   padding: 8px 12px;
@@ -1600,8 +1630,8 @@ footer small {
 
 .spaceship-option:hover {
   transform: scale(1.05);
-  border-color: var(--secondary);
-  box-shadow: 0 0 20px rgba(6, 182, 212, 0.4);
+  border-color: rgba(255, 221, 0, 0.831);
+  box-shadow: 0 0 20px rgba(255, 221, 0, 0.831);
 }
 
 .spaceship-option.selected {

@@ -109,6 +109,14 @@ enemyImage.src = assets.enemy;
 
 const backgroundImage = new Image();
 backgroundImage.src = assets.background;
+let backgroundBitmap = null;
+
+// Convert background image to ImageBitmap for faster drawImage when available
+if ('createImageBitmap' in window) {
+  backgroundImage.decode().then(() => createImageBitmap(backgroundImage))
+    .then((bmp) => { backgroundBitmap = bmp; })
+    .catch(() => {});
+}
 
 // Preload spaceship images
 const spaceshipImages = {};
@@ -2073,7 +2081,9 @@ function drawBackdrop(width, height, timestamp) {
   }
   
   // Draw background image if loaded, otherwise fallback to dark background
-  if (backgroundImage.complete && backgroundImage.naturalWidth > 0) {
+  if (backgroundBitmap) {
+    ctx.drawImage(backgroundBitmap, 0, 0, width, height);
+  } else if (backgroundImage.complete && backgroundImage.naturalWidth > 0) {
     ctx.drawImage(backgroundImage, 0, 0, width, height);
   } else {
     // Base dark background
@@ -3033,15 +3043,14 @@ function resizeCanvas() {
   elements.canvas.style.width = width + 'px';
   elements.canvas.style.height = height + 'px';
   
-  // Set actual size in memory
-  // In low graphics mode, render at 50% resolution then scale up
-  const resolutionScale = state.lowGraphics ? 0.5 : 1;
-  const dpr = (window.devicePixelRatio || 1) * resolutionScale;
-  elements.canvas.width = width * dpr;
-  elements.canvas.height = height * dpr;
+  // Set actual size in memory (account for device pixel ratio)
+  // Note: setting width/height resets the context state, so setTransform afterwards
+  const dpr = (window.devicePixelRatio || 1);
+  elements.canvas.width = Math.floor(width * dpr);
+  elements.canvas.height = Math.floor(height * dpr);
   
   // Scale the context to maintain proper coordinate system
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   
   // Apply rendering quality settings
   if (state.lowGraphics) {
@@ -3119,6 +3128,12 @@ function resizeObserverFallback() {
 }
 
 window.addEventListener('orientationchange', resizeObserverFallback);
+
+// Throttling for UI (DOM) updates to avoid jank at 2k/4k
+let lastHudUpdate = 0;
+let lastFsUiUpdate = 0;
+const HUD_UPDATE_INTERVAL_MS = 120; // ~8 FPS
+const FS_UI_UPDATE_INTERVAL_MS = 160; // ~6 FPS
 
 // Fullscreen functionality
 let isFullscreen = false;
@@ -3230,10 +3245,17 @@ document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 document.addEventListener('mozfullscreenchange', handleFullscreenChange);
 document.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
-function renderLoopTicker() {
+function renderLoopTicker(nowTs) {
+  const now = nowTs || performance.now();
   if (state.gameState) {
-    renderHud();
-    updateFullscreenProgress();
+    if (now - lastHudUpdate >= HUD_UPDATE_INTERVAL_MS) {
+      renderHud();
+      lastHudUpdate = now;
+    }
+    if (isFullscreen && now - lastFsUiUpdate >= FS_UI_UPDATE_INTERVAL_MS) {
+      updateFullscreenProgress();
+      lastFsUiUpdate = now;
+    }
   }
   requestAnimationFrame(renderLoopTicker);
 }
