@@ -63,10 +63,10 @@ const elements = {
   canvasWrapper: document.querySelector('.canvas-wrapper'),
 };
 
-const ctx = elements.canvas.getContext('2d', { 
+const ctx = elements.canvas.getContext('2d', {
   alpha: false,
   desynchronized: true,
-  willReadFrequently: false 
+  willReadFrequently: false
 });
 
 // Initialize with smooth rendering by default
@@ -115,7 +115,7 @@ let backgroundBitmap = null;
 if ('createImageBitmap' in window) {
   backgroundImage.decode().then(() => createImageBitmap(backgroundImage))
     .then((bmp) => { backgroundBitmap = bmp; })
-    .catch(() => {});
+    .catch(() => { });
 }
 
 // Preload spaceship images
@@ -247,7 +247,7 @@ function updateRoomTimer() {
   if (remainingMs <= 0) {
     elements.timerDisplay.textContent = '00:00';
     elements.timerDisplay.className = 'timer-display critical';
-    
+
     // Trigger timeout only once and only if game is running
     if (!timeoutTriggered && state.screen === 'game') {
       timeoutTriggered = true;
@@ -259,7 +259,7 @@ function updateRoomTimer() {
   const remainingMinutes = Math.floor(remainingMs / 60000);
   const remainingSeconds = Math.floor((remainingMs % 60000) / 1000);
   const timeString = `${String(remainingMinutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
-  
+
   elements.timerDisplay.textContent = timeString;
 
   // Change color based on remaining time
@@ -275,12 +275,12 @@ function updateRoomTimer() {
 function handleGameTimeout() {
   hideRoomTimer();
   state.resultsConfirmed = true; // Set to true so rematch button works
-  
+
   // Notify server about timeout (only host can do this)
   if (state.isHost && state.ws) {
     sendMessage({ type: 'timeout' });
   }
-  
+
   // Create a timeout result state
   const timeoutResults = {
     players: state.gameState?.players || [],
@@ -295,9 +295,9 @@ function handleGameTimeout() {
     }),
     config: state.config
   };
-  
+
   state.resultsState = timeoutResults;
-  
+
   // Show results with timeout message
   showScreen('results');
   renderResults({ winnerId: null, state: timeoutResults, timedOut: true });
@@ -326,35 +326,35 @@ function hideRoomTimer() {
 // Connection quality monitoring
 function updateConnectionQuality() {
   if (!elements.connectionIndicator) return;
-  
+
   // Only show during active game
   if (state.screen !== 'game' || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
     elements.connectionIndicator.style.display = 'none';
     return;
   }
-  
+
   elements.connectionIndicator.style.display = 'flex';
-  
+
   // Calculate average latency
   if (state.updateLatency.length === 0) return;
-  
+
   const avgLatency = state.updateLatency.reduce((a, b) => a + b, 0) / state.updateLatency.length;
   const maxLatency = Math.max(...state.updateLatency);
-  
+
   // Classify connection quality
   let quality = 'good';
   let text = 'Good';
-  
+
   if (avgLatency > 100 || maxLatency > 200) {
     quality = 'fair';
     text = 'Fair';
   }
-  
+
   if (avgLatency > 200 || maxLatency > 400) {
     quality = 'poor';
     text = 'Poor';
   }
-  
+
   // Update indicator
   elements.connectionIndicator.className = `connection-indicator ${quality}`;
   const textElement = elements.connectionIndicator.querySelector('.connection-text');
@@ -386,7 +386,7 @@ function saveSession() {
 function loadSession() {
   const saved = sessionStorage.getItem('kimpfun_session');
   if (!saved) return null;
-  
+
   try {
     const session = JSON.parse(saved);
     // Session expires after 2 hours
@@ -464,10 +464,10 @@ elements.muteToggle.addEventListener('click', () => {
 elements.graphicsToggle.addEventListener('click', () => {
   state.lowGraphics = !state.lowGraphics;
   elements.graphicsToggle.textContent = `Pixelated Mode: ${state.lowGraphics ? 'On' : 'Off'}`;
-  
+
   // Apply rendering quality changes
   updateRenderingQuality();
-  
+
   showToast(state.lowGraphics ? 'Pixelated mode enabled - Lag should be reduced' : 'Pixelated mode disabled - Full graphics restored', 'info', 2000);
 });
 
@@ -581,13 +581,13 @@ function renderSpaceshipGrid(gridElement, inputElement) {
         }
       });
     }
-    
+
     // Mark as selected if it's the current selection
     if (state.selectedSpaceship === i) {
       option.classList.add('selected');
       inputElement.value = i;
     }
-    
+
     gridElement.appendChild(option);
   }
 
@@ -605,7 +605,7 @@ function selectSpaceship(gridElement, inputElement, spaceshipId) {
   } else if (gridElement.id === 'join-spaceship-grid') {
     cachedJoinSelection = spaceshipId;
   }
-  
+
   // Update UI
   gridElement.querySelectorAll('.spaceship-option').forEach(opt => {
     opt.classList.remove('selected');
@@ -697,16 +697,16 @@ async function fetchRoomAvailability(roomId, { force = false } = {}) {
 
 elements.createForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  
+
   if (!state.selectedSpaceship || !elements.createSpaceship.value) {
     showStatus('⚠️ Please select a spaceship first', true);
     elements.createSpaceshipGrid.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
-  
+
   // Capitalize the first letter of the name
   const playerName = capitalizeFirstLetter(elements.createName.value.trim());
-  
+
   const payload = {
     name: playerName,
     targetScore: Number(elements.createTarget.value),
@@ -754,16 +754,16 @@ elements.joinForm.addEventListener('submit', (event) => {
     showStatus('Enter a valid room link or ID', true);
     return;
   }
-  
+
   if (!state.selectedSpaceship || !elements.joinSpaceship.value) {
     showStatus('⚠️ Please select a spaceship first', true);
     elements.joinSpaceshipGrid.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
-  
+
   // Capitalize the first letter of the name
   const playerName = capitalizeFirstLetter(elements.joinName.value.trim());
-  
+
   state.roomId = roomId;
   state.hostKey = null;
   state.joinUrl = buildJoinUrl(roomId, playerName);
@@ -802,17 +802,17 @@ elements.rematch.addEventListener('click', () => {
     showToast('Not connected to server', 'error', 2000);
     return;
   }
-  
+
   if (!state.isHost) {
     showToast('Only the host can start a rematch', 'info', 3000);
     return;
   }
-  
+
   if (!state.resultsConfirmed) {
     showToast('Finishing timeout… try again in a moment.', 'info', 2000);
     return;
   }
-  
+
   sendMessage({ type: 'rematch' });
 });
 
@@ -828,10 +828,10 @@ function leaveGame() {
     state.ws.close();
     state.ws = null;
   }
-  
+
   // Clear session
   clearSession();
-  
+
   // Reset state
   state.playerId = null;
   state.roomId = null;
@@ -851,13 +851,13 @@ function leaveGame() {
   state.hasPointer = false;
   state.lastSentInput = null;
   state.lastInputSentAt = 0;
-  
+
   clearEffectLayer();
-  
+
   // Hide timer and leave button
   hideRoomTimer();
   elements.leaveGame.style.display = 'none';
-  
+
   // Go to splash screen
   showScreen('splash');
   showToast('Left the game', 'info', 2000);
@@ -1238,7 +1238,7 @@ function showScreen(name) {
   if (elements.effectLayer && name !== 'game') {
     clearEffectLayer();
   }
-  
+
   // Hide timer when not in game screen
   if (name !== 'game') {
     hideRoomTimer();
@@ -1366,7 +1366,7 @@ function handleServerMessage(message) {
     }
   }
   state.lastServerUpdate = now;
-  
+
   switch (message.type) {
     case 'joined':
       state.playerId = message.playerId;
@@ -1379,11 +1379,11 @@ function handleServerMessage(message) {
       }
       updateFromSerializedState(message.state);
       handleStateTransition(message.state);
-      
+
       // Save session and show leave button
       saveSession();
       elements.leaveGame.style.display = 'block';
-      
+
       // Show connected toast after everything is ready
       setTimeout(() => {
         showToast('Connected', 'success', 2000);
@@ -1495,31 +1495,31 @@ function updateFromSerializedState(serialized) {
         player.displayAngle = 0;
         return;
       }
-      
+
       // Store target position for interpolation
       player.targetX = player.x;
       player.targetY = player.y;
-      
+
       // For non-local players, smoothly interpolate to the target position
       if (previous && player.id !== state.playerId) {
         const lerpFactor = 0.4; // Smoother interpolation: 40% towards target
         player.x = previous.x * (1 - lerpFactor) + player.targetX * lerpFactor;
         player.y = previous.y * (1 - lerpFactor) + player.targetY * lerpFactor;
       }
-      
+
       const dx = player.targetX - (previous ? previous.x : player.x);
       const dy = player.targetY - (previous ? previous.y : player.y);
       const magnitude = Math.hypot(dx, dy);
       if (magnitude > 0.5) {
         const targetDirX = dx / magnitude;
         const targetDirY = dy / magnitude;
-        
+
         // Smooth rotation interpolation
         if (previous && (previous.dirX || previous.dirY)) {
           const smoothing = 0.35; // 35% new direction, 65% old direction
           player.dirX = previous.dirX * (1 - smoothing) + targetDirX * smoothing;
           player.dirY = previous.dirY * (1 - smoothing) + targetDirY * smoothing;
-          
+
           // Normalize
           const newMagnitude = Math.hypot(player.dirX, player.dirY);
           if (newMagnitude > 0) {
@@ -1530,7 +1530,7 @@ function updateFromSerializedState(serialized) {
           player.dirX = targetDirX;
           player.dirY = targetDirY;
         }
-        
+
         // Calculate display angle for rendering
         player.displayAngle = Math.atan2(player.dirY, player.dirX);
       } else {
@@ -1627,14 +1627,14 @@ function updateFromSerializedState(serialized) {
         // Store target position for interpolation
         enemy.targetX = enemy.x;
         enemy.targetY = enemy.y;
-        
+
         // Interpolate position smoothly from previous to target
         if (previous && previous.x !== undefined) {
           const lerpFactor = 0.3; // 30% move towards target, 70% stay at current
           enemy.x = previous.x * (1 - lerpFactor) + enemy.targetX * lerpFactor;
           enemy.y = previous.y * (1 - lerpFactor) + enemy.targetY * lerpFactor;
         }
-        
+
         const dx = enemy.targetX - (previous ? previous.x : enemy.x);
         const dy = enemy.targetY - (previous ? previous.y : enemy.y);
         const magnitude = Math.hypot(dx, dy);
@@ -1674,8 +1674,16 @@ function updateFromSerializedState(serialized) {
       }
     });
 
-    state.gameState = serialized;
-    syncLocalPlayerFromServer(serialized);
+    // Merge partial state updates - preserve existing data if not included
+    const mergedState = {
+      ...serialized,
+      coins: serialized.coins !== undefined ? serialized.coins : (state.gameState?.coins || []),
+      powerups: serialized.powerups !== undefined ? serialized.powerups : (state.gameState?.powerups || []),
+      rapidfires: serialized.rapidfires !== undefined ? serialized.rapidfires : (state.gameState?.rapidfires || []),
+    };
+
+    state.gameState = mergedState;
+    syncLocalPlayerFromServer(mergedState);
   }
   if (serialized.state === 'results') {
     state.resultsState = serialized;
@@ -1701,7 +1709,7 @@ function renderLobby() {
     .sort((a, b) => a.name.localeCompare(b.name))
     .forEach((player) => {
       const li = document.createElement('li');
-      
+
       // Add spaceship icon if available
       if (player.spaceship) {
         const spaceshipIcon = document.createElement('img');
@@ -1710,7 +1718,7 @@ function renderLobby() {
         spaceshipIcon.alt = `Spaceship ${player.spaceship}`;
         li.appendChild(spaceshipIcon);
       }
-      
+
       const name = document.createElement('span');
       name.textContent = player.name;
       if (player.id === state.playerId) {
@@ -1728,7 +1736,7 @@ function renderLobby() {
     });
   elements.startButton.disabled = !state.isHost || (players?.length || 0) < 1;
   elements.rematch.disabled = !state.isHost;
-  
+
   // Update button text based on player count
   if (state.isHost && players?.length === 1) {
     elements.startButton.textContent = 'Play Solo';
@@ -1744,7 +1752,7 @@ function renderHud() {
   elements.scoreList.innerHTML = '';
   sorted.slice(0, 8).forEach((player) => {
     const li = document.createElement('li');
-    
+
     // Add spaceship icon if available
     if (player.spaceship) {
       const spaceshipIcon = document.createElement('img');
@@ -1753,11 +1761,11 @@ function renderHud() {
       spaceshipIcon.alt = `Spaceship ${player.spaceship}`;
       li.appendChild(spaceshipIcon);
     }
-    
+
     const nameSpan = document.createElement('span');
     nameSpan.textContent = `${player.name}${player.id === state.playerId ? ' (You)' : ''}`;
     li.appendChild(nameSpan);
-    
+
     const score = document.createElement('span');
     score.textContent = `${player.score} pts`;
     li.appendChild(score);
@@ -1768,7 +1776,7 @@ function renderHud() {
   const target = state.config?.targetScore || 50;
   const pct = Math.min(1, maxScore / target);
   elements.progressFill.style.width = `${pct * 100}%`;
-  
+
   // Update score display in progress bar
   elements.currentScore.textContent = maxScore;
   elements.targetScore.textContent = target;
@@ -1779,14 +1787,14 @@ function renderResults(message) {
   const stateResults = message.state || state.resultsState;
   const timedOut = message.timedOut || false;
   if (!stateResults) return;
-  
+
   // Display appropriate message
   if (timedOut) {
     elements.winnerAnnouncement.textContent = 'Time Out!';
   } else {
     const winner = stateResults.players?.find((p) => p.id === winnerId);
     elements.winnerAnnouncement.textContent = winner ? `${winner.name} wins!` : 'Match complete';
-    
+
     // Trigger spectacular blast animation only for winners
     if (winner) {
       triggerWinnerBlastAnimation();
@@ -1799,7 +1807,7 @@ function renderResults(message) {
     .sort((a, b) => b.score - a.score)
     .forEach((entry, index) => {
       const li = document.createElement('li');
-      
+
       // Add spaceship icon if available
       if (entry.spaceship) {
         const spaceshipIcon = document.createElement('img');
@@ -1808,17 +1816,17 @@ function renderResults(message) {
         spaceshipIcon.alt = `Spaceship ${entry.spaceship}`;
         li.appendChild(spaceshipIcon);
       }
-      
+
       const nameSpan = document.createElement('span');
       nameSpan.textContent = `${index + 1}. ${entry.name}${entry.id === state.playerId ? ' (You)' : ''}`;
       li.appendChild(nameSpan);
-      
+
       const score = document.createElement('span');
       score.textContent = `${entry.score} pts`;
       li.appendChild(score);
       elements.resultsList.appendChild(li);
     });
-  
+
   // Update rematch button based on host status
   elements.rematch.disabled = !state.isHost;
   if (state.isHost) {
@@ -1867,7 +1875,7 @@ function showStatus(message, isError = false, timeout = 4000) {
 function triggerWinnerBlastAnimation() {
   const announcement = elements.winnerAnnouncement;
   if (!announcement) return;
-  
+
   // Skip elaborate animations in low graphics mode
   if (state.lowGraphics) {
     announcement.classList.add('winner-blast-simple');
@@ -1876,30 +1884,30 @@ function triggerWinnerBlastAnimation() {
     }, 2000);
     return;
   }
-  
+
   // Add blast animation class
   announcement.classList.add('winner-blast-active');
-  
+
   // Create particle container
   const particleContainer = document.createElement('div');
   particleContainer.className = 'blast-particles-container';
   announcement.appendChild(particleContainer);
-  
+
   // Create multiple bursts of particles
   const burstCount = 5;
   const particlesPerBurst = 30;
-  
+
   for (let burst = 0; burst < burstCount; burst++) {
     setTimeout(() => {
       createParticleBurst(particleContainer, particlesPerBurst);
     }, burst * 300);
   }
-  
+
   // Create continuous sparkles
   const sparkleInterval = setInterval(() => {
     createSparkle(particleContainer);
   }, 50);
-  
+
   // Clean up after animation completes
   setTimeout(() => {
     announcement.classList.remove('winner-blast-active');
@@ -1912,18 +1920,18 @@ function triggerWinnerBlastAnimation() {
 
 function createParticleBurst(container, count) {
   const colors = ['#FFD700', '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F', '#BB8FCE'];
-  
+
   for (let i = 0; i < count; i++) {
     const particle = document.createElement('div');
     particle.className = 'blast-particle';
-    
+
     const angle = (Math.PI * 2 * i) / count;
     const velocity = 150 + Math.random() * 200;
     const size = 4 + Math.random() * 8;
     const color = colors[Math.floor(Math.random() * colors.length)];
     const rotation = Math.random() * 360;
     const duration = 1 + Math.random() * 1.5;
-    
+
     particle.style.width = `${size}px`;
     particle.style.height = `${size}px`;
     particle.style.background = color;
@@ -1931,12 +1939,12 @@ function createParticleBurst(container, count) {
     particle.style.setProperty('--ty', `${Math.sin(angle) * velocity}px`);
     particle.style.setProperty('--rotation', `${rotation}deg`);
     particle.style.animationDuration = `${duration}s`;
-    
+
     // Add glow effect
     particle.style.boxShadow = `0 0 10px ${color}, 0 0 20px ${color}`;
-    
+
     container.appendChild(particle);
-    
+
     // Remove after animation
     setTimeout(() => {
       if (particle.parentNode) {
@@ -1949,22 +1957,22 @@ function createParticleBurst(container, count) {
 function createSparkle(container) {
   const sparkle = document.createElement('div');
   sparkle.className = 'blast-sparkle';
-  
+
   const x = -50 + Math.random() * 100;
   const y = -50 + Math.random() * 100;
   const size = 2 + Math.random() * 4;
   const colors = ['#FFD700', '#FFFFFF', '#FFF59D'];
   const color = colors[Math.floor(Math.random() * colors.length)];
-  
+
   sparkle.style.left = `calc(50% + ${x}%)`;
   sparkle.style.top = `calc(50% + ${y}%)`;
   sparkle.style.width = `${size}px`;
   sparkle.style.height = `${size}px`;
   sparkle.style.background = color;
   sparkle.style.boxShadow = `0 0 5px ${color}`;
-  
+
   container.appendChild(sparkle);
-  
+
   setTimeout(() => {
     if (sparkle.parentNode) {
       sparkle.remove();
@@ -2116,7 +2124,7 @@ function drawBackdrop(width, height, timestamp) {
     ctx.fillRect(0, 0, width, height);
     return;
   }
-  
+
   // Draw background image if loaded, otherwise fallback to dark background
   if (backgroundBitmap) {
     ctx.drawImage(backgroundBitmap, 0, 0, width, height);
@@ -2132,7 +2140,7 @@ function drawBackdrop(width, height, timestamp) {
     ctx.lineWidth = 1.5;
     const gridSize = 60;
     const offset = (timestamp / 50) % gridSize;
-    
+
     for (let x = -gridSize; x < width + gridSize; x += gridSize) {
       ctx.beginPath();
       ctx.moveTo(x + offset, 0);
@@ -2173,7 +2181,7 @@ function drawCoins(coins) {
   coins.forEach((coin) => {
     const x = coin.x * scaleX;
     const y = coin.y * scaleY;
-    
+
     // Outer glow circle
     ctx.fillStyle = 'rgba(245, 158, 11, 0.2)';
     ctx.beginPath();
@@ -2211,11 +2219,11 @@ function drawPowerups(powerups, timestamp) {
   powerups.forEach((powerup) => {
     const x = powerup.x * scaleX;
     const y = powerup.y * scaleY;
-    
+
     // Pulsing animation
     const pulse = Math.sin(timestamp / 200) * 0.3 + 1;
     const radius = 11 * pulse;
-    
+
     // Outer energy ring
     if (!state.lowGraphics) {
       ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
@@ -2223,7 +2231,7 @@ function drawPowerups(powerups, timestamp) {
       ctx.arc(x, y, radius + 9, 0, Math.PI * 2);
       ctx.fill();
     }
-    
+
     // Main powerup body - star shape
     ctx.fillStyle = '#A855F7';
     ctx.beginPath();
@@ -2237,18 +2245,18 @@ function drawPowerups(powerups, timestamp) {
     }
     ctx.closePath();
     ctx.fill();
-    
+
     // Border
     ctx.strokeStyle = '#7C3AED';
     ctx.lineWidth = 2;
     ctx.stroke();
-    
+
     // Inner core
     ctx.fillStyle = '#C084FC';
     ctx.beginPath();
     ctx.arc(x, y, radius * 0.4, 0, Math.PI * 2);
     ctx.fill();
-    
+
     // Bright center
     ctx.fillStyle = '#E9D5FF';
     ctx.beginPath();
@@ -2263,11 +2271,11 @@ function drawRapidfires(rapidfires, timestamp) {
   rapidfires.forEach((rapidfire) => {
     const x = rapidfire.x * scaleX;
     const y = rapidfire.y * scaleY;
-    
+
     // Pulsing animation (faster than powerups)
     const pulse = Math.sin(timestamp / 150) * 0.4 + 1;
     const radius = 12 * pulse;
-    
+
     // Outer energy ring - orange/red glow
     if (!state.lowGraphics) {
       ctx.fillStyle = 'rgba(251, 146, 60, 0.4)';
@@ -2275,17 +2283,17 @@ function drawRapidfires(rapidfires, timestamp) {
       ctx.arc(x, y, radius + 10, 0, Math.PI * 2);
       ctx.fill();
     }
-    
+
     // Main rapidfire body - double chevron/arrow shape pointing outward
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(timestamp / 500); // Spin faster than powerups
-    
+
     // Draw three arrows pointing outward
     for (let a = 0; a < 3; a++) {
       ctx.save();
       ctx.rotate((a * Math.PI * 2) / 3);
-      
+
       // Arrow body
       ctx.fillStyle = '#FB923C';
       ctx.beginPath();
@@ -2296,23 +2304,23 @@ function drawRapidfires(rapidfires, timestamp) {
       ctx.lineTo(0, radius * 0.3);
       ctx.closePath();
       ctx.fill();
-      
+
       ctx.restore();
     }
-    
+
     ctx.restore();
-    
+
     // Center circle
     ctx.fillStyle = '#F97316';
     ctx.beginPath();
     ctx.arc(x, y, radius * 0.35, 0, Math.PI * 2);
     ctx.fill();
-    
+
     // Border on center
     ctx.strokeStyle = '#EA580C';
     ctx.lineWidth = 2;
     ctx.stroke();
-    
+
     // Bright center highlight
     ctx.fillStyle = '#FED7AA';
     ctx.beginPath();
@@ -2324,24 +2332,24 @@ function drawRapidfires(rapidfires, timestamp) {
 function drawBullets(bullets, timestamp) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
-  
+
   bullets.forEach((bullet) => {
     const x = bullet.x * scaleX;
     const y = bullet.y * scaleY;
-    
+
     // Calculate bullet direction for gradient
     const speed = Math.hypot(bullet.vx, bullet.vy);
     const dirX = bullet.vx / speed;
     const dirY = bullet.vy / speed;
-    
+
     // Bullet size
     const radius = 5;
     const tailLength = 15;
-    
+
     // Draw bullet tail (trail effect)
     if (!state.lowGraphics) {
       const gradient = ctx.createLinearGradient(
-        x - dirX * tailLength, 
+        x - dirX * tailLength,
         y - dirY * tailLength,
         x,
         y
@@ -2349,7 +2357,7 @@ function drawBullets(bullets, timestamp) {
       gradient.addColorStop(0, 'rgba(251, 146, 60, 0)');
       gradient.addColorStop(0.5, 'rgba(251, 146, 60, 0.6)');
       gradient.addColorStop(1, 'rgba(249, 115, 22, 1)');
-      
+
       ctx.strokeStyle = gradient;
       ctx.lineWidth = 8;
       ctx.lineCap = 'round';
@@ -2358,19 +2366,19 @@ function drawBullets(bullets, timestamp) {
       ctx.lineTo(x, y);
       ctx.stroke();
     }
-    
+
     // Draw bullet body with gradient
     const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
     gradient.addColorStop(0, '#FFFFFF');
     gradient.addColorStop(0.3, '#FED7AA');
     gradient.addColorStop(0.6, '#FB923C');
     gradient.addColorStop(1, '#F97316');
-    
+
     ctx.fillStyle = gradient;
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
-    
+
     // Outer glow
     if (!state.lowGraphics) {
       ctx.fillStyle = 'rgba(251, 146, 60, 0.4)';
@@ -2378,7 +2386,7 @@ function drawBullets(bullets, timestamp) {
       ctx.arc(x, y, radius + 3, 0, Math.PI * 2);
       ctx.fill();
     }
-    
+
     // Bright center highlight
     ctx.fillStyle = '#FFFFFF';
     ctx.beginPath();
@@ -2436,7 +2444,7 @@ function drawEnemies(enemies) {
   enemies.forEach((enemy) => {
     const x = enemy.x * scaleX;
     const y = enemy.y * scaleY;
-    
+
     if (enemy.active === false) {
       // Defeated enemy
       if (enemyImage && enemyImage.complete) {
@@ -2453,7 +2461,7 @@ function drawEnemies(enemies) {
         ctx.beginPath();
         ctx.arc(x, y, 6, 0, Math.PI * 2);
         ctx.fill();
-        
+
         ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
@@ -2464,16 +2472,16 @@ function drawEnemies(enemies) {
       if (isMoving && !state.lowGraphics) {
         drawFireTail(x, y, enemy.dirX || 0, enemy.dirY || 0, 20, Date.now());
       }
-      
+
       // Active enemy with spaceship image
       if (enemyImage && enemyImage.complete) {
         const size = 40; // Enemy image size (maintains aspect ratio)
         const angle = (enemy.dirX || enemy.dirY) ? Math.atan2(enemy.dirY || 0, enemy.dirX || 0) : 0;
-        
+
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(angle + Math.PI / 2); // Rotate to face direction (add 90deg because image faces up)
-        
+
         ctx.drawImage(enemyImage, -size / 2, -size / 2, size, size);
         ctx.restore();
       } else {
@@ -2523,39 +2531,39 @@ function drawEnemies(enemies) {
 function drawFireTail(x, y, dirX, dirY, radius, timestamp) {
   const magnitude = Math.hypot(dirX, dirY);
   if (magnitude < 0.01) return;
-  
+
   // Normalize direction
   const nx = dirX / magnitude;
   const ny = dirY / magnitude;
-  
+
   // Fire tail parameters
   const tailLength = radius * 2.5;
   const tailWidth = radius * 0.8;
-  
+
   // Animated flicker effect
   const flicker1 = Math.sin(timestamp * 0.01) * 0.2 + 0.8;
   const flicker2 = Math.sin(timestamp * 0.015 + 1) * 0.15 + 0.85;
-  
+
   // Start position (more inside the ship)
   const startX = x - nx * radius * 0.8;
   const startY = y - ny * radius * 0.8;
-  
+
   // End position (tail end)
   const endX = startX - nx * tailLength * flicker1;
   const endY = startY - ny * tailLength * flicker1;
-  
+
   // Perpendicular vector for width
   const perpX = -ny;
   const perpY = nx;
-  
+
   ctx.save();
-  
+
   // Outer flame (red-orange)
   const gradient1 = ctx.createLinearGradient(startX, startY, endX, endY);
   gradient1.addColorStop(0, `rgba(255, 69, 0, ${0.8 * flicker1})`); // Red-orange
   gradient1.addColorStop(0.5, `rgba(255, 140, 0, ${0.5 * flicker2})`); // Dark orange
   gradient1.addColorStop(1, 'rgba(255, 69, 0, 0)'); // Fade to transparent
-  
+
   ctx.fillStyle = gradient1;
   ctx.beginPath();
   ctx.moveTo(startX + perpX * tailWidth * 0.3, startY + perpY * tailWidth * 0.3);
@@ -2563,17 +2571,17 @@ function drawFireTail(x, y, dirX, dirY, radius, timestamp) {
   ctx.lineTo(endX, endY);
   ctx.closePath();
   ctx.fill();
-  
+
   // Middle flame (orange-yellow)
   const gradient2 = ctx.createLinearGradient(startX, startY, endX, endY);
   gradient2.addColorStop(0, `rgba(255, 165, 0, ${0.9 * flicker2})`); // Orange
   gradient2.addColorStop(0.4, `rgba(255, 215, 0, ${0.6 * flicker1})`); // Gold
   gradient2.addColorStop(1, 'rgba(255, 165, 0, 0)'); // Fade to transparent
-  
+
   const midLength = tailLength * 0.7 * flicker2;
   const midEndX = startX - nx * midLength;
   const midEndY = startY - ny * midLength;
-  
+
   ctx.fillStyle = gradient2;
   ctx.beginPath();
   ctx.moveTo(startX + perpX * tailWidth * 0.2, startY + perpY * tailWidth * 0.2);
@@ -2581,17 +2589,17 @@ function drawFireTail(x, y, dirX, dirY, radius, timestamp) {
   ctx.lineTo(midEndX, midEndY);
   ctx.closePath();
   ctx.fill();
-  
+
   // Inner core (bright yellow-white)
   const gradient3 = ctx.createLinearGradient(startX, startY, endX, endY);
   gradient3.addColorStop(0, `rgba(255, 255, 200, ${0.95 * flicker1})`); // Bright yellow-white
   gradient3.addColorStop(0.3, `rgba(255, 255, 100, ${0.7 * flicker2})`); // Yellow
   gradient3.addColorStop(1, 'rgba(255, 255, 0, 0)'); // Fade to transparent
-  
+
   const coreLength = tailLength * 0.4 * flicker1;
   const coreEndX = startX - nx * coreLength;
   const coreEndY = startY - ny * coreLength;
-  
+
   ctx.fillStyle = gradient3;
   ctx.beginPath();
   ctx.moveTo(startX + perpX * tailWidth * 0.1, startY + perpY * tailWidth * 0.1);
@@ -2599,7 +2607,7 @@ function drawFireTail(x, y, dirX, dirY, radius, timestamp) {
   ctx.lineTo(coreEndX, coreEndY);
   ctx.closePath();
   ctx.fill();
-  
+
   ctx.restore();
 }
 
@@ -2654,7 +2662,7 @@ function drawPlayers(players, timestamp) {
       let isMoving = false;
       let fireDirX = 0;
       let fireDirY = 0;
-      
+
       if (isSelf) {
         // For current player, use actual input state
         isMoving = Math.hypot(state.combinedDir.x, state.combinedDir.y) > 0.01;
@@ -2666,7 +2674,7 @@ function drawPlayers(players, timestamp) {
         fireDirX = player.dirX || 0;
         fireDirY = player.dirY || 0;
       }
-      
+
       if (isMoving && !state.lowGraphics) {
         drawFireTail(x, y, fireDirX, fireDirY, radius, timestamp);
       }
@@ -2674,7 +2682,7 @@ function drawPlayers(players, timestamp) {
       const respawnEffect = state.respawnEffects.get(player.id);
       let showPlayer = true; // For blink effect
       let glowIntensity = 0;
-      
+
       if (respawnEffect) {
         const elapsed = Date.now() - respawnEffect.startTime;
         if (elapsed >= respawnEffect.duration) {
@@ -2684,10 +2692,10 @@ function drawPlayers(players, timestamp) {
           // Blink effect - faster at start, slower at end
           const blinkFrequency = 12 - (progress * 10); // 12Hz to 2Hz
           showPlayer = Math.sin(elapsed * blinkFrequency * Math.PI / 100) > 0;
-          
+
           // Glow intensity - strong at start, fades out
           glowIntensity = 1 - progress;
-          
+
           // Glowing aura around player
           if (!state.lowGraphics && glowIntensity > 0) {
             const gradient = ctx.createRadialGradient(x, y, radius, x, y, radius + 20);
@@ -2701,7 +2709,7 @@ function drawPlayers(players, timestamp) {
           }
         }
       }
-      
+
       // Dashing effect
       if (!state.lowGraphics && player.dashing) {
         ctx.strokeStyle = '#F59E0B';
@@ -2724,22 +2732,22 @@ function drawPlayers(players, timestamp) {
         }
       } else {
         // Draw spaceship image
-  const spaceshipImg = player.spaceship ? spaceshipImages[player.spaceship] : null;
+        const spaceshipImg = player.spaceship ? spaceshipImages[player.spaceship] : null;
         if (spaceshipImg && spaceshipImg.complete) {
           const size = radius * 3; // Image size
           const angleSource =
             player.renderAngle !== undefined ? player.renderAngle :
-            player.displayAngle !== undefined ? player.displayAngle :
-            (player.dirX || player.dirY ? Math.atan2(player.dirY || 0, player.dirX || 0) : 0);
+              player.displayAngle !== undefined ? player.displayAngle :
+                (player.dirX || player.dirY ? Math.atan2(player.dirY || 0, player.dirX || 0) : 0);
           const angle = angleSource;
-          
+
           ctx.save();
           ctx.translate(x, y);
           ctx.rotate(angle + Math.PI / 2); // Rotate to face direction (add 90deg because image faces up)
-          
+
           ctx.drawImage(spaceshipImg, -size / 2, -size / 2, size, size);
           ctx.restore();
-          
+
           // Self indicator ring
           if (isSelf) {
             ctx.strokeStyle = '#F59E0B';
@@ -2754,12 +2762,12 @@ function drawPlayers(players, timestamp) {
           ctx.beginPath();
           ctx.arc(x, y, radius, 0, Math.PI * 2);
           ctx.fill();
-          
+
           // Border
           ctx.strokeStyle = isSelf ? '#15803D' : '#0369A1';
           ctx.lineWidth = 2;
           ctx.stroke();
-          
+
           // Self indicator
           if (isSelf) {
             ctx.strokeStyle = '#F59E0B';
@@ -2769,7 +2777,7 @@ function drawPlayers(players, timestamp) {
             ctx.stroke();
           }
         }
-      
+
         // Powerup indicator - purple aura
         if (player.hasPowerup) {
           ctx.strokeStyle = '#A855F7';
@@ -2778,7 +2786,7 @@ function drawPlayers(players, timestamp) {
           ctx.arc(x, y, radius * 2 + 6, 0, Math.PI * 2);
           ctx.stroke();
         }
-        
+
         // Rapid-fire indicator - orange/red spinning aura
         if (player.hasRapidfire) {
           // Spinning arrows around player
@@ -2786,11 +2794,11 @@ function drawPlayers(players, timestamp) {
           ctx.translate(x, y);
           const spinAngle = (Date.now() / 300) % (Math.PI * 2); // Fast spin
           ctx.rotate(spinAngle);
-          
+
           for (let i = 0; i < 4; i++) {
             ctx.save();
             ctx.rotate((i * Math.PI) / 2);
-            
+
             // Draw small arrow
             ctx.fillStyle = '#FB923C';
             ctx.beginPath();
@@ -2800,12 +2808,12 @@ function drawPlayers(players, timestamp) {
             ctx.lineTo(4, -(radius * 2 + 4));
             ctx.closePath();
             ctx.fill();
-            
+
             ctx.restore();
           }
-          
+
           ctx.restore();
-          
+
           ctx.strokeStyle = '#F97316';
           ctx.lineWidth = 2.5;
           ctx.beginPath();
@@ -2824,7 +2832,7 @@ function drawPlayers(players, timestamp) {
     const labelWidth = textWidth + 12;
     const labelHeight = 18;
     const borderRadius = 10;
-    
+
     // Draw rounded rectangle background
     ctx.beginPath();
     ctx.roundRect(labelX, labelY, labelWidth, labelHeight, borderRadius);
@@ -2845,18 +2853,18 @@ function drawPlayers(players, timestamp) {
 function drawPowerupEffects(timestamp) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
-  
+
   // Clean up old effects and draw active ones
   state.powerupEffects = state.powerupEffects.filter(effect => {
     const elapsed = timestamp - effect.startTime;
     if (elapsed >= effect.duration) {
       return false; // Remove completed effect
     }
-    
+
     const progress = elapsed / effect.duration;
     const x = effect.x * scaleX;
     const y = effect.y * scaleY;
-    
+
     if (state.lowGraphics) {
       // Simple circle flash for low graphics mode
       const opacity = (1 - progress) * 0.8;
@@ -2866,27 +2874,27 @@ function drawPowerupEffects(timestamp) {
       ctx.fill();
       return true;
     }
-    
+
     // Full effect for normal graphics mode
     // Expanding ring effect
     const maxRadius = 200; // Match POWERUP_KILL_RADIUS from server
     const radius = maxRadius * progress;
     const opacity = 1 - progress;
-    
+
     // Outer explosion ring
     ctx.strokeStyle = `rgba(168, 85, 247, ${opacity * 0.8})`;
     ctx.lineWidth = 8 * (1 - progress * 0.7);
     ctx.beginPath();
     ctx.arc(x, y, radius * scaleX, 0, Math.PI * 2);
     ctx.stroke();
-    
+
     // Inner explosion ring
     ctx.strokeStyle = `rgba(192, 132, 252, ${opacity * 0.6})`;
     ctx.lineWidth = 6 * (1 - progress * 0.7);
     ctx.beginPath();
     ctx.arc(x, y, radius * 0.7 * scaleX, 0, Math.PI * 2);
     ctx.stroke();
-    
+
     // Flash at center
     if (progress < 0.3) {
       ctx.fillStyle = `rgba(233, 213, 255, ${(1 - progress / 0.3) * 0.7})`;
@@ -2894,7 +2902,7 @@ function drawPowerupEffects(timestamp) {
       ctx.arc(x, y, 30 * (1 - progress / 0.3), 0, Math.PI * 2);
       ctx.fill();
     }
-    
+
     // Particles
     if (!state.lowGraphics) {
       for (let i = 0; i < 12; i++) {
@@ -2902,14 +2910,14 @@ function drawPowerupEffects(timestamp) {
         const particleRadius = radius * 0.9;
         const px = x + Math.cos(angle) * particleRadius * scaleX;
         const py = y + Math.sin(angle) * particleRadius * scaleY;
-        
+
         ctx.fillStyle = `rgba(168, 85, 247, ${opacity * 0.6})`;
         ctx.beginPath();
         ctx.arc(px, py, 5 * (1 - progress), 0, Math.PI * 2);
         ctx.fill();
       }
     }
-    
+
     return true; // Keep effect
   });
 }
@@ -2959,23 +2967,23 @@ function clearEffectLayer() {
 function drawLeavingPlayers(timestamp) {
   const scaleX = canvasScaleX();
   const scaleY = canvasScaleY();
-  
+
   state.leavingPlayers.forEach((leaving, playerId) => {
     // Safety checks
     if (!leaving || !leaving.startTime || !leaving.animationDuration) {
       state.leavingPlayers.delete(playerId);
       return;
     }
-    
+
     const elapsed = timestamp - leaving.startTime;
     const progress = Math.min(Math.max(0, elapsed / leaving.animationDuration), 1);
-    
+
     // Easing function for smooth pop-out
     const easeOut = 1 - Math.pow(1 - progress, 3);
-    
+
     const x = leaving.x * scaleX;
     const y = leaving.y * scaleY;
-    
+
     // Scale effect - grows then shrinks (ensure it never goes below 0.1)
     let scale;
     if (progress < 0.3) {
@@ -2984,31 +2992,31 @@ function drawLeavingPlayers(timestamp) {
       scale = Math.max(0.1, 1.15 - (progress - 0.3) * 1.5); // 1.15 to 0.1
     }
     const radius = Math.max(1, 18 * scale); // Ensure radius is always positive
-    
+
     // Fade out
     const alpha = Math.max(0, 1 - easeOut);
-    
+
     // Pop-out with expanding circle
     ctx.save();
     ctx.globalAlpha = alpha;
-    
+
     // Outer ring (expanding)
     ctx.strokeStyle = '#DC2626';
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.arc(x, y, radius * (1 + progress * 2), 0, Math.PI * 2);
     ctx.stroke();
-    
+
     // Player body
     ctx.fillStyle = '#64748B';
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
-    
+
     ctx.strokeStyle = '#475569';
     ctx.lineWidth = 2;
     ctx.stroke();
-    
+
     // X mark
     ctx.strokeStyle = '#DC2626';
     ctx.lineWidth = 3;
@@ -3019,14 +3027,14 @@ function drawLeavingPlayers(timestamp) {
     ctx.moveTo(x + crossSize, y - crossSize);
     ctx.lineTo(x - crossSize, y + crossSize);
     ctx.stroke();
-    
+
     // Name fading out
     ctx.fillStyle = `rgba(148, 163, 184, ${alpha})`;
     ctx.font = 'bold 13px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillText(leaving.name, x, y - radius - 8);
-    
+
     ctx.restore();
   });
 }
@@ -3045,11 +3053,11 @@ window.addEventListener('resize', () => resizeCanvas(), { passive: true });
 resizeCanvas();
 
 function resizeCanvas() {
-  const isInFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement || 
-                            document.mozFullScreenElement || document.msFullscreenElement);
-  
+  const isInFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement ||
+    document.mozFullScreenElement || document.msFullscreenElement);
+
   let containerWidth, containerHeight;
-  
+
   if (isInFullscreen) {
     // Use full viewport in fullscreen mode
     containerWidth = window.innerWidth;
@@ -3059,7 +3067,7 @@ function resizeCanvas() {
     containerWidth = Math.min(window.innerWidth - 32, 960);
     containerHeight = Math.min(window.innerHeight - 220, 540);
   }
-  
+
   const ratio = 1600 / 900;
   let width = containerWidth;
   let height = width / ratio;
@@ -3067,7 +3075,7 @@ function resizeCanvas() {
     height = containerHeight;
     width = height * ratio;
   }
-  
+
   if (!isInFullscreen) {
     width = Math.max(640, Math.floor(width));
     height = Math.max(360, Math.floor(height));
@@ -3075,20 +3083,20 @@ function resizeCanvas() {
     width = Math.floor(width);
     height = Math.floor(height);
   }
-  
+
   // Set display size (CSS pixels)
   elements.canvas.style.width = width + 'px';
   elements.canvas.style.height = height + 'px';
-  
+
   // Set actual size in memory (account for device pixel ratio)
   // Note: setting width/height resets the context state, so setTransform afterwards
   const dpr = (window.devicePixelRatio || 1);
   elements.canvas.width = Math.floor(width * dpr);
   elements.canvas.height = Math.floor(height * dpr);
-  
+
   // Scale the context to maintain proper coordinate system
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  
+
   // Apply rendering quality settings
   if (state.lowGraphics) {
     ctx.imageSmoothingEnabled = false;
@@ -3124,7 +3132,7 @@ function updateFromDeepLink() {
 function tryRestoreSession() {
   const session = loadSession();
   if (!session) return false;
-  
+
   // Restore state
   state.roomId = session.roomId;
   state.playerId = session.playerId;
@@ -3133,15 +3141,15 @@ function tryRestoreSession() {
   state.passcode = session.passcode;
   state.joinUrl = session.joinUrl;
   state.selectedSpaceship = session.spaceship;
-  
+
   // Show leave button
   elements.leaveGame.style.display = 'block';
-  
+
   // Get display name from session or use a default
-  const displayName = session.joinUrl ? 
-    new URLSearchParams(new URL(session.joinUrl).search).get('name') || 'Player' : 
+  const displayName = session.joinUrl ?
+    new URLSearchParams(new URL(session.joinUrl).search).get('name') || 'Player' :
     'Player';
-  
+
   // Reconnect
   showStatus('Reconnecting...');
   connectSocket({
@@ -3151,7 +3159,7 @@ function tryRestoreSession() {
     passcode: session.passcode,
     spaceship: session.spaceship
   });
-  
+
   return true;
 }
 
@@ -3178,7 +3186,7 @@ let isFullscreen = false;
 function updateFullscreenButton() {
   const maximizeIcon = elements.fullscreenToggle.querySelector('.maximize-icon');
   const minimizeIcon = elements.fullscreenToggle.querySelector('.minimize-icon');
-  
+
   if (isFullscreen) {
     maximizeIcon.style.display = 'none';
     minimizeIcon.style.display = 'block';
@@ -3192,26 +3200,26 @@ function updateFullscreenProgress() {
   if (isFullscreen && state.gameState) {
     elements.fullscreenProgress.style.display = 'block';
     elements.fullscreenScoreboard.style.display = 'block';
-    
+
     // Update progress bar and scores to match the main HUD
     const players = state.gameState.players || [];
     const sorted = players.slice().sort((a, b) => b.score - a.score);
     const maxScore = sorted.length ? sorted[0].score : 0;
     const targetScore = state.config?.targetScore || 50;
     const progress = Math.min((maxScore / targetScore) * 100, 100);
-    
+
     elements.fullscreenProgressFill.style.width = progress + '%';
     elements.fullscreenCurrentScore.textContent = maxScore;
     elements.fullscreenTargetScore.textContent = targetScore;
-    
+
     // Update scoreboard with all players except the current player
     elements.fullscreenScoreList.innerHTML = '';
     sorted.forEach((player) => {
       // Skip the current player since their score is shown in the progress bar on the right
       if (player.id === state.playerId) return;
-      
+
       const li = document.createElement('li');
-      
+
       // Add spaceship icon
       if (player.spaceship) {
         const spaceshipIcon = document.createElement('img');
@@ -3220,13 +3228,13 @@ function updateFullscreenProgress() {
         spaceshipIcon.alt = `Spaceship ${player.spaceship}`;
         li.appendChild(spaceshipIcon);
       }
-      
+
       // Add score
       const score = document.createElement('span');
       score.className = 'score-value';
       score.textContent = `${player.score} pts`;
       li.appendChild(score);
-      
+
       elements.fullscreenScoreList.appendChild(li);
     });
   } else {
@@ -3237,8 +3245,8 @@ function updateFullscreenProgress() {
 
 async function toggleFullscreen() {
   try {
-    if (!document.fullscreenElement && !document.webkitFullscreenElement && 
-        !document.mozFullScreenElement && !document.msFullscreenElement) {
+    if (!document.fullscreenElement && !document.webkitFullscreenElement &&
+      !document.mozFullScreenElement && !document.msFullscreenElement) {
       // Enter fullscreen
       const wrapper = elements.canvasWrapper;
       if (wrapper.requestFullscreen) {
@@ -3268,8 +3276,8 @@ async function toggleFullscreen() {
 }
 
 function handleFullscreenChange() {
-  isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement || 
-                    document.mozFullScreenElement || document.msFullscreenElement);
+  isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement ||
+    document.mozFullScreenElement || document.msFullscreenElement);
   updateFullscreenButton();
   updateFullscreenProgress();
   resizeCanvas();

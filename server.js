@@ -115,12 +115,12 @@ server.listen(PORT, () => {
 async function serveStatic(req, res) {
   const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
   let pathname = decodeURIComponent(parsedUrl.pathname);
-  
+
   // Serve index.html for root and /play/ routes
   if (pathname === '/' || pathname.startsWith('/play/')) {
     pathname = '/index.html';
   }
-  
+
   // Serve all files from public directory
   const filePath = path.join(PUBLIC_DIR, pathname);
   if (!filePath.startsWith(PUBLIC_DIR)) {
@@ -281,6 +281,11 @@ async function handleCreateRoom(req, res) {
     bullets: new Map(),
     reservedNames: new Set([hostName.toLowerCase()]),
     lastLobbyBroadcast: Date.now(),
+    // Dirty flags for delta compression
+    coinsDirty: true,
+    powerupsDirty: true,
+    rapidfiresDirty: true,
+    enemiesDirty: true,
   };
   rooms.set(roomId, room);
 
@@ -397,7 +402,7 @@ function handleJoin(socket, payload) {
   const existingPlayer = Array.from(room.players.values()).find(
     p => p.name.toLowerCase() === loweredName && p.disconnected
   );
-  
+
   if (existingPlayer) {
     // Reconnect existing player - they keep their original spaceship
     // No need to validate spaceship for reconnecting players
@@ -405,10 +410,10 @@ function handleJoin(socket, payload) {
     existingPlayer.disconnected = false;
     socket.playerId = existingPlayer.id;
     socket.roomId = room.id;
-    
+
     // Remove from disconnected list
     disconnectedPlayers.delete(existingPlayer.id);
-    
+
     send(socket, {
       type: 'joined',
       roomId: room.id,
@@ -416,7 +421,7 @@ function handleJoin(socket, payload) {
       isHost: existingPlayer.isHost,
       state: serializeRoom(room),
     });
-    
+
     if (room.state === 'running') {
       send(socket, {
         type: 'match-start',
@@ -428,7 +433,7 @@ function handleJoin(socket, payload) {
         state: serializeLobby(room),
       });
     }
-    
+
     room.lastActive = Date.now();
     return;
   }
@@ -442,7 +447,7 @@ function handleJoin(socket, payload) {
   const spaceshipTaken = Array.from(room.players.values()).some(
     p => p.spaceship === spaceship && !p.disconnected
   );
-  
+
   if (spaceshipTaken) {
     send(socket, { type: 'error', message: 'Spaceship already taken' });
     return;
@@ -469,8 +474,8 @@ function handleJoin(socket, payload) {
   const playerId = crypto.randomBytes(8).toString('hex');
   const player = {
     id: playerId,
-  name: finalName,
-  isHost,
+    name: finalName,
+    isHost,
     connection: socket,
     roomId: room.id,
     lastInputAt: 0,
@@ -486,7 +491,7 @@ function handleJoin(socket, payload) {
     x: Math.random() * (MAP_WIDTH - 200) + 100,
     y: Math.random() * (MAP_HEIGHT - 200) + 100,
     angle: 0,
-  aim: 0,
+    aim: 0,
     score: 0,
     alive: true,
     respawnAt: 0,
@@ -505,7 +510,7 @@ function handleJoin(socket, payload) {
   if (room.state === 'running') {
     player.x = Math.random() * (MAP_WIDTH - 400) + 200;
     player.y = Math.random() * (MAP_HEIGHT - 400) + 200;
-    
+
     send(socket, {
       type: 'joined',
       roomId: room.id,
@@ -614,7 +619,7 @@ function handleTimeout(socket, payload) {
   room.state = 'results';
   room.winnerId = null; // No winner for timeout
   room.lastActive = Date.now();
-  
+
   broadcast(room, {
     type: 'match-end',
     winnerId: null,
@@ -636,7 +641,12 @@ function startMatch(room, isRematch = false) {
   room.powerupsSpawnedThisGame = 0; // Reset powerup counter for new game
   room.lastRapidfireSpawn = Date.now();
   room.lastActive = Date.now();
-  
+
+  // Reset dirty flags
+  room.coinsDirty = true;
+  room.powerupsDirty = true;
+  room.rapidfiresDirty = true;
+
   // Always reset the game start time so the in-game timer starts fresh on rematch
   room.gameStartedAt = Date.now();
 
@@ -679,6 +689,7 @@ function ensureCoins(room) {
       x: Math.random() * (MAP_WIDTH - 120) + 60,
       y: Math.random() * (MAP_HEIGHT - 120) + 60,
     });
+    room.coinsDirty = true;
   }
 }
 
@@ -707,22 +718,22 @@ function ensurePowerups(room, now) {
   for (const id of toDelete) {
     room.powerups.delete(id);
   }
-  
+
   // Check if we've already spawned the maximum powerups for this game session
   if (room.powerupsSpawnedThisGame >= MAX_POWERUPS_PER_GAME) {
     return;
   }
-  
+
   // Only spawn a new powerup if enough time has passed
   if (now - room.lastPowerupSpawn < POWERUP_SPAWN_INTERVAL) {
     return;
   }
-  
+
   // Don't spawn if there's already one on the map (only one at a time)
   if (room.powerups.size > 0) {
     return;
   }
-  
+
   const id = crypto.randomBytes(6).toString('hex');
   room.powerups.set(id, {
     id,
@@ -732,6 +743,7 @@ function ensurePowerups(room, now) {
   });
   room.lastPowerupSpawn = now;
   room.powerupsSpawnedThisGame += 1; // Increment the counter
+  room.powerupsDirty = true;
 }
 
 function ensureRapidfires(room, now) {
@@ -745,17 +757,17 @@ function ensureRapidfires(room, now) {
   for (const id of toDelete) {
     room.rapidfires.delete(id);
   }
-  
+
   // Only spawn a new rapidfire if enough time has passed
   if (now - room.lastRapidfireSpawn < RAPIDFIRE_SPAWN_INTERVAL) {
     return;
   }
-  
+
   // Don't spawn if there's already one on the map (only one at a time)
   if (room.rapidfires.size > 0) {
     return;
   }
-  
+
   const id = crypto.randomBytes(6).toString('hex');
   room.rapidfires.set(id, {
     id,
@@ -764,6 +776,7 @@ function ensureRapidfires(room, now) {
     expiresAt: now + 10000, // Rapidfire collectible disappears after 10 seconds
   });
   room.lastRapidfireSpawn = now;
+  room.rapidfiresDirty = true;
 }
 
 function randomRange(min, max) {
@@ -842,17 +855,22 @@ function updateMatch(room, now) {
   if (room.state !== 'running') return;
   ensurePowerups(room, now);
   ensureRapidfires(room, now);
-  
+
   // Only broadcast if there are active players connected
   const hasActivePlayers = Array.from(room.players.values()).some(
     p => !p.disconnected && p.connection && p.connection.readyState === p.connection.OPEN
   );
-  
+
   if (hasActivePlayers) {
     broadcast(room, {
       type: 'state',
-      state: serializeGame(room),
+      state: serializeGame(room, false), // Use partial update for tick
     });
+
+    // Reset dirty flags after broadcast
+    room.coinsDirty = false;
+    room.powerupsDirty = false;
+    room.rapidfiresDirty = false;
   }
 }
 
@@ -867,6 +885,7 @@ function handleCoinCollisions(room, now) {
         player.score += 1;
         if (checkWin(room, player)) {
           room.coins.delete(coin.id);
+          room.coinsDirty = true;
           return;
         }
       }
@@ -874,6 +893,7 @@ function handleCoinCollisions(room, now) {
   }
   for (const id of toDelete) {
     room.coins.delete(id);
+    room.coinsDirty = true;
   }
   if (toDelete.length) {
     ensureCoins(room);
@@ -884,10 +904,10 @@ function handlePowerupCollisions(room, now) {
   const toDelete = [];
   for (const player of room.players.values()) {
     if (player.disconnected || !player.alive || player.hasPowerup) continue;
-    
+
     // Check if player wants to collect powerup (pressed spacebar)
     const wantsPowerup = player.wantsPowerup;
-    
+
     if (wantsPowerup) {
       for (const powerup of room.powerups.values()) {
         const dist = Math.hypot(player.x - powerup.x, player.y - powerup.y);
@@ -919,19 +939,19 @@ function handlePowerupExpiration(room, now) {
 function handlePowerupUsage(room, now) {
   for (const player of room.players.values()) {
     if (player.disconnected || !player.alive) continue;
-    
+
     const wantsPowerup = player.wantsPowerup;
     player.wantsPowerup = false;
-    
+
     // Only use powerup if player has one AND the input wasn't already consumed by collection
     if (wantsPowerup && player.hasPowerup) {
       // Use powerup - kill nearby players
       player.hasPowerup = false;
       player.powerupExpiresAt = 0;
-      
+
       for (const target of room.players.values()) {
         if (target.id === player.id || target.disconnected || !target.alive) continue;
-        
+
         const dist = Math.hypot(player.x - target.x, player.y - target.y);
         if (dist <= POWERUP_KILL_RADIUS) {
           // Kill the target player
@@ -940,7 +960,7 @@ function handlePowerupUsage(room, now) {
           }
           target.alive = false;
           target.respawnAt = now + RESPAWN_MS;
-          
+
           // Give points to the player who used the powerup
           player.score += 10;
           if (checkWin(room, player)) {
@@ -956,7 +976,7 @@ function handleRapidfireCollisions(room, now) {
   const toDelete = [];
   for (const player of room.players.values()) {
     if (player.disconnected || !player.alive || player.hasRapidfire) continue;
-    
+
     for (const rapidfire of room.rapidfires.values()) {
       const dist = Math.hypot(player.x - rapidfire.x, player.y - rapidfire.y);
       if (dist <= PLAYER_RADIUS + RAPIDFIRE_RADIUS) {
@@ -988,17 +1008,17 @@ function handleRapidfireAutoShoot(room, now) {
   // Auto-shoot for players with active rapidfire
   for (const player of room.players.values()) {
     if (player.disconnected || !player.alive || !player.hasRapidfire) continue;
-    
+
     // Check if enough time has passed since the last shot
     if (now - player.lastRapidfireShot >= RAPIDFIRE_INTERVAL_MS) {
       player.lastRapidfireShot = now;
-      
+
       // Spawn a bullet
       // Determine direction - use input direction if moving, otherwise face right
       let dirX = player.inputDir.x;
       let dirY = player.inputDir.y;
       const magnitude = Math.hypot(dirX, dirY);
-      
+
       if (magnitude < 0.01) {
         // If not moving, shoot in the direction the player is facing (right by default)
         dirX = 1;
@@ -1008,7 +1028,7 @@ function handleRapidfireAutoShoot(room, now) {
         dirX /= magnitude;
         dirY /= magnitude;
       }
-      
+
       const bulletId = crypto.randomBytes(6).toString('hex');
       room.bullets.set(bulletId, {
         id: bulletId,
@@ -1026,24 +1046,24 @@ function handleRapidfireAutoShoot(room, now) {
 
 function updateBullets(room, now, delta) {
   const toDelete = [];
-  
+
   for (const bullet of room.bullets.values()) {
     // Check if bullet expired
     if (now >= bullet.expiresAt) {
       toDelete.push(bullet.id);
       continue;
     }
-    
+
     // Move bullet
     bullet.x += bullet.vx * delta;
     bullet.y += bullet.vy * delta;
-    
+
     // Remove bullets that go out of bounds
     if (bullet.x < 0 || bullet.x > MAP_WIDTH || bullet.y < 0 || bullet.y > MAP_HEIGHT) {
       toDelete.push(bullet.id);
     }
   }
-  
+
   for (const id of toDelete) {
     room.bullets.delete(id);
   }
@@ -1051,14 +1071,14 @@ function updateBullets(room, now, delta) {
 
 function handleBulletCollisions(room, now) {
   const bulletsToDelete = [];
-  
+
   for (const bullet of room.bullets.values()) {
     let hitSomething = false;
-    
+
     // Check collision with players (not the owner)
     for (const player of room.players.values()) {
       if (player.id === bullet.ownerId || player.disconnected || !player.alive) continue;
-      
+
       const dist = Math.hypot(player.x - bullet.x, player.y - bullet.y);
       if (dist <= PLAYER_RADIUS + BULLET_RADIUS) {
         // Hit player - kill them
@@ -1067,7 +1087,7 @@ function handleBulletCollisions(room, now) {
         }
         player.alive = false;
         player.respawnAt = now + RESPAWN_MS;
-        
+
         // Give score to shooter
         const shooter = room.players.get(bullet.ownerId);
         if (shooter) {
@@ -1078,26 +1098,26 @@ function handleBulletCollisions(room, now) {
             break;
           }
         }
-        
+
         hitSomething = true;
         break;
       }
     }
-    
+
     if (hitSomething) {
       bulletsToDelete.push(bullet.id);
       continue;
     }
-    
+
     // Check collision with enemies
     for (const enemy of room.enemies.values()) {
       if (enemy.respawnAt && now < enemy.respawnAt) continue;
-      
+
       const dist = Math.hypot(enemy.x - bullet.x, enemy.y - bullet.y);
       if (dist <= ENEMY_RADIUS + BULLET_RADIUS) {
         // Hit enemy - respawn it after 6 seconds
         enemy.respawnAt = now + 6000;
-        
+
         // Give score to shooter
         const shooter = room.players.get(bullet.ownerId);
         if (shooter) {
@@ -1108,17 +1128,17 @@ function handleBulletCollisions(room, now) {
             break;
           }
         }
-        
+
         hitSomething = true;
         break;
       }
     }
-    
+
     if (hitSomething) {
       bulletsToDelete.push(bullet.id);
     }
   }
-  
+
   for (const id of bulletsToDelete) {
     room.bullets.delete(id);
   }
@@ -1231,8 +1251,8 @@ function serializeLobby(room) {
   };
 }
 
-function serializeGame(room) {
-  return {
+function serializeGame(room, full = true) {
+  const state = {
     id: room.id,
     state: room.state,
     config: room.config,
@@ -1255,18 +1275,31 @@ function serializeGame(room) {
         spaceship: p.spaceship,
         aim: typeof p.aim === 'number' ? p.aim : null,
       })),
-    coins: Array.from(room.coins.values()).map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y) })),
+    // Always send enemies and bullets as they move frequently
     enemies: Array.from(room.enemies.values()).map((e) => ({ id: e.id, x: Math.round(e.x), y: Math.round(e.y), active: !e.respawnAt })),
-    powerups: Array.from(room.powerups.values()).map((p) => ({ id: p.id, x: Math.round(p.x), y: Math.round(p.y) })),
-    rapidfires: Array.from(room.rapidfires.values()).map((r) => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y) })),
-    bullets: Array.from(room.bullets.values()).map((b) => ({ 
-      id: b.id, 
-      x: Math.round(b.x), 
-      y: Math.round(b.y), 
-      vx: b.vx, 
-      vy: b.vy 
+    bullets: Array.from(room.bullets.values()).map((b) => ({
+      id: b.id,
+      x: Math.round(b.x),
+      y: Math.round(b.y),
+      vx: b.vx,
+      vy: b.vy
     })),
   };
+
+  // Conditionally include static entities based on dirty flags
+  if (full || room.coinsDirty) {
+    state.coins = Array.from(room.coins.values()).map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y) }));
+  }
+
+  if (full || room.powerupsDirty) {
+    state.powerups = Array.from(room.powerups.values()).map((p) => ({ id: p.id, x: Math.round(p.x), y: Math.round(p.y) }));
+  }
+
+  if (full || room.rapidfiresDirty) {
+    state.rapidfires = Array.from(room.rapidfires.values()).map((r) => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y) }));
+  }
+
+  return state;
 }
 
 function serializeResults(room) {
@@ -1296,18 +1329,18 @@ function handleDisconnect(socket) {
   if (!player) return;
   const room = rooms.get(player.roomId);
   if (!room) return;
-  
+
   // Store disconnected player for potential reconnection
   disconnectedPlayers.set(player.id, {
     player: { ...player },
     roomId: room.id,
     disconnectTime: Date.now()
   });
-  
+
   // Mark player as disconnected but keep in room
   player.connection = null;
   player.disconnected = true;
-  
+
   // Set a timeout to actually remove the player if they don't reconnect
   setTimeout(() => {
     const disconnectInfo = disconnectedPlayers.get(player.id);
@@ -1322,7 +1355,7 @@ function handleDisconnect(socket) {
             promoteNewHost(currentRoom);
           }
           currentRoom.lastActive = Date.now();
-          
+
           // Only send lobby-update if in lobby, otherwise game continues
           if (currentRoom.state === 'lobby') {
             broadcast(currentRoom, {
@@ -1330,7 +1363,7 @@ function handleDisconnect(socket) {
               state: serializeLobby(currentRoom),
             });
           }
-          
+
           if (currentRoom.players.size === 0) {
             rooms.delete(currentRoom.id);
           }
@@ -1338,7 +1371,7 @@ function handleDisconnect(socket) {
       }
     }
   }, RECONNECT_GRACE_MS);
-  
+
   room.lastActive = Date.now();
 }
 
@@ -1363,23 +1396,23 @@ function sweepRooms() {
   rooms.forEach((room, id) => {
     const timeoutMs = room.config.roomTimeoutMinutes * 60000;
     const inactiveMs = now - room.lastActive;
-    
+
     if (inactiveMs > timeoutMs) {
       console.log(`Sweeping room ${id} - inactive for ${Math.floor(inactiveMs / 60000)} minutes (timeout: ${room.config.roomTimeoutMinutes} minutes)`);
-      
+
       // Notify all players in the room before deletion
       broadcast(room, {
         type: 'error',
         message: `Room has expired due to inactivity (${room.config.roomTimeoutMinutes} minutes).`
       });
-      
+
       // Close all connections
       room.players.forEach((player) => {
         if (player.connection && player.connection.readyState === player.connection.OPEN) {
           player.connection.close();
         }
       });
-      
+
       rooms.delete(id);
     }
   });
